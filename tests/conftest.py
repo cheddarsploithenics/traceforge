@@ -102,6 +102,11 @@ class FakeNmap:
     def set_scenario(self, mode: str = "ok", **extra: object) -> None:
         (self.path.parent / "scenario.json").write_text(json.dumps({"mode": mode, **extra}))
 
+    def queue_xml(self, *documents: str) -> None:
+        """Make the next runs print these XML documents, one per run."""
+        queue = [{"mode": "xml", "xml": doc} for doc in documents]
+        (self.path.parent / "scenario.json").write_text(json.dumps(queue))
+
     @property
     def pids(self) -> list[int]:
         log = self.path.parent / "pids.txt"
@@ -171,3 +176,29 @@ def sign_in(client: TestClient, app: FastAPI) -> str:
     response = client.post("/api/v1/auth/session", json={"code": code}, headers=browser_headers())
     assert response.status_code == 200, response.text
     return response.json()["csrf_token"]
+
+
+# --- inventory / comparison fixtures -------------------------------------------------
+
+
+@pytest.fixture
+def db(tmp_path: Path):
+    from traceforge.db import Database
+
+    database = Database(tmp_path / "t.db")
+    database.initialize()
+    return database
+
+
+@pytest.fixture
+def evidence_dir(tmp_path: Path) -> Path:
+    path = tmp_path / "evidence"
+    path.mkdir()
+    return path
+
+
+@pytest.fixture
+def project(db) -> int:
+    from traceforge.db.repositories import ProjectRepository
+
+    return ProjectRepository(db).create("acme", "SOW-1")["id"]

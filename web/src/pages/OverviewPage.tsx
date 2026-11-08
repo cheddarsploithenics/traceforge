@@ -1,4 +1,12 @@
-import type { Project, SessionInfo } from "../api/client";
+import { useState } from "react";
+
+import {
+  type AssetStats,
+  type Project,
+  type SessionInfo,
+  UnauthorizedError,
+  getAssetStats,
+} from "../api/client";
 import { Icon } from "../components/Icon";
 import { ScanTable } from "../components/ScanTable";
 import { EmptyState, Field, PageHeader, Panel, StatTile } from "../components/ui";
@@ -16,6 +24,7 @@ interface OverviewPageProps {
   onRefreshHealth: () => void;
   onOpenScan: (scanId: number) => void;
   onShowScans: () => void;
+  onShowAssets: () => void;
   onShowProjects: () => void;
   onUnauthorized: () => void;
 }
@@ -28,18 +37,28 @@ export function OverviewPage({
   onRefreshHealth,
   onOpenScan,
   onShowScans,
+  onShowAssets,
   onShowProjects,
   onUnauthorized,
 }: OverviewPageProps) {
-  const { state, refresh } = useScans(onUnauthorized);
+  const [assetStats, setAssetStats] = useState<AssetStats | null>(null);
+  const { state, refresh } = useScans(onUnauthorized, {
+    // Scan completions change the inventory, so refresh its numbers with the list.
+    onRefreshed: () => {
+      getAssetStats()
+        .then(setAssetStats)
+        .catch((err: unknown) => {
+          if (err instanceof UnauthorizedError) onUnauthorized();
+        });
+    },
+  });
   const scans = state.kind === "ready" ? state.scans : [];
   const running = scans.filter((s) => s.status === "running").length;
   const queued = scans.filter((s) => s.status === "queued").length;
   const completed = scans.filter((s) => s.status === "completed");
   const failed = scans.filter((s) => s.status === "failed").length;
-  const openPorts = completed.reduce((sum, s) => sum + s.open_ports, 0);
-  const scopedProjects = projects.filter((p) => p.scope_rule_count > 0).length;
   const loaded = state.kind === "ready";
+  const stats = assetStats;
 
   return (
     <>
@@ -63,9 +82,14 @@ export function OverviewPage({
 
       <dl className="stats" aria-label="Summary">
         <StatTile
-          label="Projects"
-          value={formatCount(projects.length)}
-          caption={`${scopedProjects} with authorized scope`}
+          label="Assets"
+          value={stats ? formatCount(stats.assets) : "—"}
+          caption={stats ? `${stats.assets_with_open_ports} with open ports` : undefined}
+        />
+        <StatTile
+          label="Open ports"
+          value={stats ? formatCount(stats.open_ports) : "—"}
+          caption={stats ? `${stats.detected_services} service(s) detected by probing` : undefined}
         />
         <StatTile
           label="Scans"
@@ -77,11 +101,7 @@ export function OverviewPage({
           value={loaded ? formatCount(running + queued) : "—"}
           caption={loaded ? `${running} running · ${queued} queued` : undefined}
         />
-        <StatTile
-          label="Open ports found"
-          value={loaded ? formatCount(openPorts) : "—"}
-          caption={loaded ? `across ${completed.length} completed scans` : undefined}
-        />
+
       </dl>
 
       <div className="grid grid--overview">
@@ -150,12 +170,17 @@ export function OverviewPage({
           </Panel>
 
           <Panel
-            title="Projects"
+            title={`Projects · ${projects.length}`}
             flush
             actions={
-              <button type="button" className="btn btn--ghost btn--sm" onClick={onShowProjects}>
-                Manage
-              </button>
+              <>
+                <button type="button" className="btn btn--ghost btn--sm" onClick={onShowAssets}>
+                  Assets
+                </button>
+                <button type="button" className="btn btn--ghost btn--sm" onClick={onShowProjects}>
+                  Manage
+                </button>
+              </>
             }
           >
             {projectsError && (

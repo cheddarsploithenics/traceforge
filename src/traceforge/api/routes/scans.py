@@ -18,7 +18,13 @@ from traceforge.config import Settings
 from traceforge.db.repositories import NotFoundError
 from traceforge.execution.executor import Executor
 from traceforge.execution.jobs import ScanJobManager
-from traceforge.schemas import ACTIVE_SCAN_STATUSES, Scan, ScanResults, ScanStatus
+from traceforge.schemas import (
+    ACTIVE_SCAN_STATUSES,
+    EvidenceVerification,
+    Scan,
+    ScanResults,
+    ScanStatus,
+)
 from traceforge.security.auth import AuthenticatedPrincipal
 
 router = APIRouter(prefix="/api/v1/scans", tags=["scans"])
@@ -74,6 +80,46 @@ async def cancel_scan(
         # Not owned by this process's job manager: just record the outcome.
         executor.scans.finish(scan_id, "cancelled", error=reason)
     return _get_scan(executor, scan_id)
+
+
+def _evidence_bytes(settings: Settings, name: str) -> bytes | None:
+    if Path(name).name != name or name.startswith("."):
+        return None
+    try:
+        fd = os.open(settings.evidence_path / name, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as handle:
+        return handle.read()
+
+
+@router.get("/{scan_id}/evidence/verify", response_model=EvidenceVerification)
+def verify_evidence(
+    scan_id: int, _: AuthenticatedPrincipal, executor: ExecutorDep, settings: SettingsDep
+) -> EvidenceVerification:
+    """Re-hash the evidence file and compare it with the SHA-256 recorded at scan time."""
+    scan = _get_scan(executor, scan_id)
+    evidence = scan["evidence"]
+    if evidence is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"scan {scan_id} has no evidence")
+    data = _evidence_bytes(settings, evidence["file"])
+    actual = hashlib.sha256(data).hexdigest() if data is not None else None
+    verified = actual == evidence["sha256"]
+    return EvidenceVerification(
+        scan_id=scan_id,
+        file=evidence["file"],
+        recorded_sha256=evidence["sha256"],
+        actual_sha256=actual,
+        size_bytes=len(data) if data is not None else None,
+        verified=verified,
+        detail=(
+            "evidence file matches its recorded SHA-256"
+            if verified
+            else "evidence file is missing"
+            if data is None
+            else "evidence file does NOT match its recorded SHA-256"
+        ),
+    )
 
 
 @router.get(

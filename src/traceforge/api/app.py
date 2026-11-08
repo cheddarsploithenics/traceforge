@@ -9,14 +9,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from traceforge import __version__
-from traceforge.api.routes import auth, health, projects, scans
+from traceforge.api.routes import assets, auth, health, projects, scans
 from traceforge.config import Settings, get_settings
 from traceforge.db import Database
 from traceforge.execution.executor import Executor, Runner
 from traceforge.execution.jobs import ScanJobManager
-from traceforge.execution.nmap import NmapAdapter
+from traceforge.execution.nmap import NmapAdapter, parse_nmap_xml
 from traceforge.execution.scope import Resolver, system_resolver
 from traceforge.execution.tools import ToolRegistry
+from traceforge.inventory.store import backfill_scans
 from traceforge.security.guard import LocalRequestGuard
 from traceforge.security.sessions import SessionStore
 from traceforge.security.tokens import generate_secret, remove_token_file, write_token_file
@@ -63,6 +64,16 @@ def create_app(
         database.initialize()
         if interrupted := jobs.recover():
             logger.warning("Marked %d interrupted scan(s) as failed", len(interrupted))
+        # Re-read older scans' evidence (hash-verified) to build the asset inventory.
+        counts = backfill_scans(database, settings.evidence_path, {"nmap": parse_nmap_xml})
+        if counts["scans"]:
+            logger.info(
+                "Asset inventory: updated %d earlier scan(s) (%d re-read from verified evidence, "
+                "%d with unverifiable evidence and unknown coverage)",
+                counts["scans"],
+                counts["reparsed"],
+                counts["unverifiable"],
+            )
         token_path = settings.token_path
         write_token_file(token_path, api_token)
         code, _ = sessions.issue_login_code()
@@ -114,4 +125,5 @@ def create_app(
     app.include_router(auth.router)
     app.include_router(projects.router)
     app.include_router(scans.router)
+    app.include_router(assets.router)
     return app

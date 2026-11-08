@@ -139,6 +139,54 @@ MIGRATIONS: tuple[str, ...] = (
     );
     CREATE INDEX idx_scan_ports_host ON scan_ports (scan_host_id);
     """,
+    # 4 — asset intelligence (v0.3). Additive only: no table is rebuilt or
+    # dropped, and every existing row is kept. Derived columns are filled in
+    # by traceforge.inventory at startup (see backfill_scans).
+    """
+    -- Stable public identifier, assigned once and never reused.
+    ALTER TABLE assets ADD COLUMN uid TEXT;
+    UPDATE assets SET uid = 'ast_' || lower(hex(randomblob(8))) WHERE uid IS NULL;
+    CREATE UNIQUE INDEX idx_assets_uid ON assets (uid);
+    -- 0 while the host has only been "assumed up" (e.g. -Pn) without answering.
+    ALTER TABLE assets ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE assets ADD COLUMN open_ports INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE assets ADD COLUMN last_scan_id INTEGER REFERENCES scans (id) ON DELETE SET NULL;
+    CREATE INDEX idx_assets_project ON assets (project_id, last_seen);
+
+    -- Which ports each scan probed ({"tcp": "1-1024"}); NULL = unknown.
+    ALTER TABLE scans ADD COLUMN coverage TEXT;
+    -- Bumped when results are (re)interpreted with this release's rules.
+    ALTER TABLE scans ADD COLUMN ingest_version INTEGER NOT NULL DEFAULT 0;
+
+    ALTER TABLE scan_hosts ADD COLUMN observed_at TEXT;
+    ALTER TABLE scan_hosts ADD COLUMN timed_out INTEGER NOT NULL DEFAULT 0;
+    -- Ports reported in bulk: [{"state": "closed", "count": 997, "ports": {"tcp": "…"}]
+    ALTER TABLE scan_hosts ADD COLUMN extraports TEXT NOT NULL DEFAULT '[]';
+    CREATE INDEX idx_scan_hosts_asset ON scan_hosts (asset_id);
+
+    -- Current state of every port ever seen open on an asset. Derived from the
+    -- observations (scan_hosts/scan_ports) and recomputed, never edited.
+    CREATE TABLE asset_ports (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_id           INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+        protocol           TEXT    NOT NULL,
+        port               INTEGER NOT NULL CHECK (port BETWEEN 0 AND 65535),
+        state              TEXT    NOT NULL,
+        state_scan_id      INTEGER REFERENCES scans (id) ON DELETE SET NULL,
+        first_seen         TEXT    NOT NULL,
+        last_seen          TEXT    NOT NULL,
+        last_open_at       TEXT,
+        service_name       TEXT,
+        service_product    TEXT,
+        service_version    TEXT,
+        service_extrainfo  TEXT,
+        service_method     TEXT,
+        service_confidence INTEGER,
+        cpe                TEXT    NOT NULL DEFAULT '[]',
+        service_scan_id    INTEGER REFERENCES scans (id) ON DELETE SET NULL,
+        UNIQUE (asset_id, protocol, port)
+    );
+    """,
 )
 
 SCHEMA_VERSION = len(MIGRATIONS)

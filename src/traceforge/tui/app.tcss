@@ -45,3 +45,31 @@
     min-height: 6;
     border: round $primary;
 }
+
+#asset-list,
+#compare-changes {
+    height: 1fr;
+    min-height: 6;
+    border: round $primary;
+}
+
+#asset-detail,
+#compare-summary {
+    padding: 0 2;
+}
+
+#asset-ports,
+#asset-observations {
+    height: 1fr;
+    min-height: 5;
+    border: round $primary;
+}
+
+#compare-form {
+    height: auto;
+    padding: 0 1;
+}
+
+#compare-form Input {
+    width: 24;
+}

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from traceforge.api.deps import get_executor
 from traceforge.db.repositories import ConflictError, NotFoundError
@@ -16,9 +16,11 @@ from traceforge.execution.executor import (
 )
 from traceforge.execution.jobs import QueueFullError
 from traceforge.execution.scope import InvalidTargetError, ScopeViolationError, parse_scope_rule
+from traceforge.inventory.compare import ComparisonError, compare_scans
 from traceforge.schemas import (
     Project,
     ProjectCreate,
+    ScanComparison,
     ScanLaunch,
     ScanLaunchResult,
     ScopeCheckResponse,
@@ -184,3 +186,30 @@ async def launch_scan(
         targets=result.targets,
         scan_addresses=result.scan_addresses,
     )
+
+
+@router.get("/{project_id}/scans/compare", response_model=ScanComparison)
+def compare_project_scans(
+    project_id: int,
+    _: AuthenticatedPrincipal,
+    executor: ExecutorDep,
+    baseline: Annotated[int, Query(description="Earlier scan (A).")],
+    comparison: Annotated[int, Query(description="Later scan (B).")],
+) -> dict:
+    """Differences between two completed scans of this project.
+
+    Calculated on demand from stored observations. Only changes observed by
+    both scans are reported as added/removed/changed; anything one scan did
+    not observe (not scanned, host timed out, coverage unknown, -Pn without a
+    response) is reported as inconclusive. Scans from another project are
+    reported as not found.
+    """
+    try:
+        executor.projects.get(project_id)
+    except NotFoundError as exc:
+        raise _not_found(exc) from exc
+    with executor.scans.db.connect() as conn:
+        try:
+            return compare_scans(conn, project_id, baseline, comparison)
+        except ComparisonError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc

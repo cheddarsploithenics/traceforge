@@ -12,6 +12,7 @@ import {
   getScanResults,
 } from "../api/client";
 import { Icon } from "../components/Icon";
+import { type ComparePreset, ScanCompare } from "../components/ScanCompare";
 import { ScanDetail } from "../components/ScanDetail";
 import { ScanForm } from "../components/ScanForm";
 import { ScanTable } from "../components/ScanTable";
@@ -42,10 +43,15 @@ interface ScansPageProps {
   projects: Project[];
   /** Scan to open on arrival (e.g. clicked on the overview). */
   initialScanId: number | null;
+  onOpenAsset: (uid: string) => void;
   onUnauthorized: () => void;
 }
 
-export function ScansPage({ projects, initialScanId, onUnauthorized }: ScansPageProps) {
+type View = "history" | "compare";
+
+export function ScansPage({ projects, initialScanId, onOpenAsset, onUnauthorized }: ScansPageProps) {
+  const [view, setView] = useState<View>("history");
+  const [comparePreset, setComparePreset] = useState<ComparePreset | null>(null);
   const [detail, setDetail] = useState<Detail>(
     initialScanId === null ? { kind: "none" } : { kind: "scan", id: initialScanId, results: null, error: null },
   );
@@ -118,6 +124,13 @@ export function ScansPage({ projects, initialScanId, onUnauthorized }: ScansPage
   const openScan = detail.kind === "scan" ? scans.find((s) => s.id === detail.id) : undefined;
   const openStatus = detail.kind === "scan" ? (detail.results?.scan.status ?? openScan?.status) : undefined;
   const projectName = (id: number | null) => projects.find((p) => p.id === id)?.name ?? `#${id}`;
+  // The latest earlier completed scan of the same project, for one-click comparison.
+  const previousCompleted =
+    openScan && openStatus === "completed"
+      ? scans.find(
+          (s) => s.project_id === openScan.project_id && s.status === "completed" && s.id < openScan.id,
+        )
+      : undefined;
 
   return (
     <>
@@ -154,12 +167,41 @@ export function ScansPage({ projects, initialScanId, onUnauthorized }: ScansPage
         </div>
       )}
 
-      {notice && (
+      <div className="segmented view-switch" role="group" aria-label="Scans view">
+        {(["history", "compare"] as const).map((name) => (
+          <button
+            key={name}
+            type="button"
+            className="segmented__item"
+            aria-pressed={view === name}
+            onClick={() => setView(name)}
+          >
+            <Icon name={name === "history" ? "scans" : "compare"} size={14} />
+            {name === "history" ? "History" : "Compare scans"}
+          </button>
+        ))}
+      </div>
+
+      {notice && view === "history" && (
         <p role="status" className="callout callout--neutral">
           {notice}
         </p>
       )}
 
+      {view === "compare" ? (
+        <ScanCompare
+          key={comparePreset ? `${comparePreset.baseline}-${comparePreset.comparison}` : "manual"}
+          projects={projects}
+          scans={scans}
+          preset={comparePreset}
+          onOpenScan={(id) => {
+            setView("history");
+            open(id);
+          }}
+          onOpenAsset={onOpenAsset}
+          onUnauthorized={onUnauthorized}
+        />
+      ) : (
       <div className={detail.kind === "none" ? "split" : "split split--open"}>
         <Panel flush className="split__main">
           <div className="toolbar">
@@ -266,6 +308,23 @@ export function ScansPage({ projects, initialScanId, onUnauthorized }: ScansPage
                     Evidence XML
                   </a>
                 )}
+                {previousCompleted && openScan?.project_id != null && (
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--sm"
+                    onClick={() => {
+                      setComparePreset({
+                        projectId: openScan.project_id as number,
+                        baseline: previousCompleted.id,
+                        comparison: detail.id,
+                      });
+                      setView("compare");
+                    }}
+                  >
+                    <Icon name="compare" size={14} />
+                    Compare with #{previousCompleted.id}
+                  </button>
+                )}
               </>
             }
           >
@@ -281,6 +340,7 @@ export function ScansPage({ projects, initialScanId, onUnauthorized }: ScansPage
           </SidePanel>
         )}
       </div>
+      )}
     </>
   );
 }

@@ -5,6 +5,7 @@ import type { Route } from "../lib/route";
 
 const NAV: { route: Route; label: string; icon: IconName }[] = [
   { route: "overview", label: "Overview", icon: "overview" },
+  { route: "assets", label: "Assets", icon: "assets" },
   { route: "scans", label: "Scans", icon: "scans" },
   { route: "projects", label: "Projects", icon: "projects" },
 ];

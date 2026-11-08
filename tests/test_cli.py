@@ -180,3 +180,34 @@ def test_cli_scan_options_are_validated(capsys: pytest.CaptureFixture[str]) -> N
         main(["scan", "run", "1", "10.0.0.5", "--timing", "1"])
     with pytest.raises(SystemExit):
         main(["scan", "run", "1", "10.0.0.5", "-p", "22", "--top-ports", "10"])
+
+
+def test_cli_assets_and_scan_compare(
+    app, settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tests.test_tui import seed_inventory
+
+    _wire_cli_to_app(monkeypatch, app)
+    first, second = seed_inventory(app, settings)
+
+    assert main(["asset", "list", "--project", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "10.0.0.5" in out and "[acme]" in out and "1 open: 22/ssh" in out
+    uid = out.split()[0]
+    assert uid.startswith("ast_")
+
+    assert main(["asset", "show", uid]) == 0
+    out = capsys.readouterr().out
+    assert "22/tcp" in out and "detected" in out and "OpenSSH 9.7p1" in out
+    assert "8080/tcp" in out and "closed" in out and "port-label" in out
+    assert f"scan #{second}" in out and "requested 10.0.0.0/24 → 10.0.0.5" in out
+
+    assert main(["scan", "compare", str(first), str(second)]) == 0
+    out = capsys.readouterr().out
+    assert "0 added · 1 removed · 1 changed · 0 inconclusive" in out
+    assert "REMOVED" in out and "port_closed" in out and "was open, now confirmed closed" in out
+
+    assert main(["scan", "compare", str(first), str(first)]) == 1
+    assert "two different scans" in capsys.readouterr().err
+    assert main(["asset", "show", "ast_0000000000000000"]) == 1
+    assert "404" in capsys.readouterr().err
