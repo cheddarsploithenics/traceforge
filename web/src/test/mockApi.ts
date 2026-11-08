@@ -34,7 +34,10 @@ export function mockApi(routes: Record<string, Handler>) {
   return calls;
 }
 
-export const HEALTHY = { status: "ok", version: "0.1.0", database: "ok" };
+export const HEALTHY = { status: "ok", version: "0.2.0", database: "ok" };
+
+/** Scan list request issued by the overview and scans pages. */
+export const SCANS_LIST = "GET /api/v1/scans?limit=200";
 export const SESSION = {
   method: "session",
   csrf_token: "csrf-123",

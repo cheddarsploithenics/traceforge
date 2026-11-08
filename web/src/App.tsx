@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  type Project,
   type SessionInfo,
   UnauthorizedError,
   fetchHealth,
@@ -9,27 +10,40 @@ import {
   signIn,
   signOut,
 } from "./api/client";
-import { type AuthState, AuthCard } from "./components/AuthCard";
-import { HealthCard, type HealthState } from "./components/HealthCard";
-import { type ProjectsState, ProjectsCard } from "./components/ProjectsCard";
-import { ScansPage } from "./components/ScansPage";
+import { Sidebar } from "./layout/Sidebar";
+import { type HealthState, Topbar } from "./layout/Topbar";
+import { errorMessage } from "./lib/format";
+import { type Route, useRoute } from "./lib/route";
+import { OverviewPage } from "./pages/OverviewPage";
+import { ProjectsPage } from "./pages/ProjectsPage";
+import { ScansPage } from "./pages/ScansPage";
+import { SignInPage } from "./pages/SignInPage";
 
-type View = "overview" | "scans";
+type AuthState =
+  | { kind: "checking" }
+  | { kind: "signed-out"; message?: string }
+  | { kind: "signed-in"; session: SessionInfo };
 
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+type ProjectsState =
+  | { kind: "loading" }
+  | { kind: "ready"; projects: Project[] }
+  | { kind: "error"; message: string };
+
+const TITLES: Record<Route, string> = { overview: "Overview", scans: "Scans", projects: "Projects" };
 
 export default function App({ loginCode = null }: { loginCode?: string | null }) {
   const [health, setHealth] = useState<HealthState>({ kind: "loading" });
   const [auth, setAuth] = useState<AuthState>({ kind: "checking" });
   const [projects, setProjects] = useState<ProjectsState>({ kind: "loading" });
-  const [view, setView] = useState<View>("overview");
+  const [route, navigate] = useRoute();
+  const [focusScan, setFocusScan] = useState<number | null>(null);
 
   const refreshHealth = useCallback((signal?: AbortSignal) => {
     setHealth({ kind: "loading" });
     fetchHealth(signal)
       .then((data) => setHealth({ kind: "ready", health: data }))
       .catch((err: unknown) => {
-        if (!signal?.aborted) setHealth({ kind: "error", message: message(err) });
+        if (!signal?.aborted) setHealth({ kind: "error", message: errorMessage(err) });
       });
   }, []);
 
@@ -49,7 +63,7 @@ export default function App({ loginCode = null }: { loginCode?: string | null })
         .then((session) => isActive() && setAuth({ kind: "signed-in", session }))
         .catch((err: unknown) => {
           if (!isActive()) return;
-          const text = err instanceof UnauthorizedError ? failure : message(err);
+          const text = err instanceof UnauthorizedError ? failure : errorMessage(err);
           setAuth({ kind: "signed-out", message: text });
         });
     },
@@ -70,6 +84,11 @@ export default function App({ loginCode = null }: { loginCode?: string | null })
     };
   }, [loginCode, handleAuth]);
 
+  const onUnauthorized = useCallback(
+    () => setAuth({ kind: "signed-out", message: "Your session has expired." }),
+    [],
+  );
+
   useEffect(() => {
     if (auth.kind !== "signed-in") return;
     const controller = new AbortController();
@@ -78,70 +97,78 @@ export default function App({ loginCode = null }: { loginCode?: string | null })
       .then((data) => setProjects({ kind: "ready", projects: data }))
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
-        if (err instanceof UnauthorizedError) {
-          setAuth({ kind: "signed-out", message: "Your session has expired." });
-        } else {
-          setProjects({ kind: "error", message: message(err) });
-        }
+        if (err instanceof UnauthorizedError) onUnauthorized();
+        else setProjects({ kind: "error", message: errorMessage(err) });
       });
     return () => controller.abort();
-  }, [auth.kind]);
+  }, [auth.kind, onUnauthorized]);
 
-  const onSignIn = (code: string) => {
-    setAuth({ kind: "checking" });
-    handleAuth(signIn(code), "That sign-in code is invalid, expired or already used.");
-  };
+  if (auth.kind !== "signed-in") {
+    return (
+      <SignInPage
+        health={health}
+        checking={auth.kind === "checking"}
+        message={auth.kind === "signed-out" ? auth.message : undefined}
+        onSignIn={(code) => {
+          setAuth({ kind: "checking" });
+          handleAuth(signIn(code), "That sign-in code is invalid, expired or already used.");
+        }}
+        onRetryHealth={() => refreshHealth()}
+      />
+    );
+  }
 
-  const onUnauthorized = useCallback(
-    () => setAuth({ kind: "signed-out", message: "Your session has expired." }),
-    [],
-  );
-
+  const projectList = projects.kind === "ready" ? projects.projects : [];
+  const projectsError = projects.kind === "error" ? projects.message : null;
   const onSignOut = () => {
     signOut()
       .catch(() => undefined)
       .finally(() => setAuth({ kind: "signed-out" }));
   };
-
-  const signedIn = auth.kind === "signed-in";
-  const current: View = signedIn ? view : "overview";
+  const go = (next: Route) => {
+    setFocusScan(null);
+    navigate(next);
+  };
 
   return (
-    <div className={current === "scans" ? "layout layout--wide" : "layout"}>
-      <header className="masthead">
-        <h1>TraceForge</h1>
-        <p>Evidence-driven penetration testing orchestration</p>
-        {signedIn && (
-          <nav className="tabs" aria-label="Sections">
-            {(["overview", "scans"] as const).map((name) => (
-              <button
-                key={name}
-                type="button"
-                className="tab"
-                aria-current={current === name ? "page" : undefined}
-                onClick={() => setView(name)}
-              >
-                {name === "overview" ? "Overview" : "Scans"}
-              </button>
-            ))}
-          </nav>
-        )}
-      </header>
-      <main>
-        {current === "overview" && (
-          <>
-            <HealthCard state={health} onRefresh={() => refreshHealth()} />
-            <AuthCard state={auth} onSignIn={onSignIn} onSignOut={onSignOut} />
-            {signedIn && <ProjectsCard state={projects} />}
-          </>
-        )}
-        {current === "scans" && (
-          <ScansPage
-            projects={projects.kind === "ready" ? projects.projects : []}
-            onUnauthorized={onUnauthorized}
-          />
-        )}
-      </main>
+    <div className="shell">
+      <Sidebar
+        route={route}
+        onNavigate={go}
+        version={health.kind === "ready" ? health.health.version : null}
+      />
+      <div className="shell__main">
+        <Topbar title={TITLES[route]} health={health} session={auth.session} onSignOut={onSignOut} />
+        <main className="content">
+          {route === "overview" && (
+            <OverviewPage
+              health={health}
+              session={auth.session}
+              projects={projectList}
+              projectsError={projectsError}
+              onRefreshHealth={() => refreshHealth()}
+              onOpenScan={(id) => {
+                setFocusScan(id);
+                navigate("scans");
+              }}
+              onShowScans={() => go("scans")}
+              onShowProjects={() => go("projects")}
+              onUnauthorized={onUnauthorized}
+            />
+          )}
+          {route === "scans" && (
+            <ScansPage
+              key={focusScan ?? "all"}
+              projects={projectList}
+              initialScanId={focusScan}
+              onUnauthorized={onUnauthorized}
+            />
+          )}
+          {route === "projects" && (
+            <ProjectsPage projects={projectList} error={projectsError} onUnauthorized={onUnauthorized} />
+          )}
+        </main>
+      </div>
     </div>
   );
 }

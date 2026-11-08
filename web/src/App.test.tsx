@@ -1,10 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import { CSRF_HEADER, resetClientState } from "./api/client";
-import { HEALTHY, SESSION, json, mockApi } from "./test/mockApi";
+import { HEALTHY, SCANS_LIST, SESSION, json, mockApi } from "./test/mockApi";
 
 const unauthorized = () => json({ detail: "Authentication required" }, 401);
 const PROJECTS = [
@@ -18,6 +18,12 @@ const PROJECTS = [
     scope_rule_count: 3,
   },
 ];
+const signedIn = {
+  "GET /health": () => json(HEALTHY),
+  "GET /api/v1/auth/session": () => json(SESSION),
+  "GET /api/v1/projects": () => json(PROJECTS),
+  [SCANS_LIST]: () => json([]),
+};
 
 beforeEach(() => {
   resetClientState();
@@ -26,11 +32,11 @@ beforeEach(() => {
 });
 
 describe("health", () => {
-  it("shows healthy backend status", async () => {
+  it("shows healthy backend status on the sign-in screen", async () => {
     const calls = mockApi({ "GET /health": () => json(HEALTHY), "GET /api/v1/auth/session": unauthorized });
     render(<App />);
-    expect(await screen.findByText("OK")).toBeInTheDocument();
-    expect(screen.getByText("0.1.0")).toBeInTheDocument();
+    expect(await screen.findByText(/API OK/)).toBeInTheDocument();
+    expect(screen.getByText("0.2.0")).toBeInTheDocument();
     // Same-origin relative URLs only: never an absolute, cross-origin API URL.
     expect(calls.every((c) => c.path.startsWith("/"))).toBe(true);
   });
@@ -41,15 +47,16 @@ describe("health", () => {
       "GET /api/v1/auth/session": unauthorized,
     });
     render(<App />);
-    expect(await screen.findByText("DEGRADED")).toBeInTheDocument();
+    expect(await screen.findByText(/API DEGRADED/)).toBeInTheDocument();
   });
 
   it("explains how to start the backend when it is unreachable", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("Failed to fetch"));
     render(<App />);
     const alerts = await screen.findAllByRole("alert");
-    expect(alerts[0]).toHaveTextContent("Cannot reach the TraceForge API");
+    expect(alerts.some((a) => a.textContent?.includes("Cannot reach the TraceForge API"))).toBe(true);
     expect(screen.getByText("traceforge serve")).toBeInTheDocument();
+    expect(screen.getByText(/API unreachable/)).toBeInTheDocument();
   });
 });
 
@@ -59,14 +66,14 @@ describe("authentication", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
     expect(screen.getByText("traceforge dashboard-link")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Projects" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Main" })).not.toBeInTheDocument();
   });
 
   it("redeems a sign-in link exactly once, even under StrictMode", async () => {
     const calls = mockApi({
-      "GET /health": () => json(HEALTHY),
+      ...signedIn,
+      "GET /api/v1/auth/session": unauthorized,
       "POST /api/v1/auth/session": () => json(SESSION),
-      "GET /api/v1/projects": () => json(PROJECTS),
     });
 
     render(
@@ -94,12 +101,12 @@ describe("authentication", () => {
   });
 
   it("signs in with a pasted code", async () => {
-    let signedIn = false;
+    let session = false;
     mockApi({
-      "GET /health": () => json(HEALTHY),
-      "GET /api/v1/auth/session": () => (signedIn ? json(SESSION) : unauthorized()),
+      ...signedIn,
+      "GET /api/v1/auth/session": () => (session ? json(SESSION) : unauthorized()),
       "POST /api/v1/auth/session": () => {
-        signedIn = true;
+        session = true;
         return json(SESSION);
       },
       "GET /api/v1/projects": () => json([]),
@@ -109,16 +116,12 @@ describe("authentication", () => {
       target: { value: "  pasted-code  " },
     });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
-    expect(await screen.findByText(/No projects yet/)).toBeInTheDocument();
+    expect(await screen.findByText("No projects yet")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Overview", level: 1 })).toBeInTheDocument();
   });
 
   it("sends the CSRF token only on state-changing requests", async () => {
-    const calls = mockApi({
-      "GET /health": () => json(HEALTHY),
-      "GET /api/v1/auth/session": () => json(SESSION),
-      "GET /api/v1/projects": () => json(PROJECTS),
-      "DELETE /api/v1/auth/session": () => json(null, 204),
-    });
+    const calls = mockApi({ ...signedIn, "DELETE /api/v1/auth/session": () => json(null, 204) });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
@@ -131,11 +134,7 @@ describe("authentication", () => {
   });
 
   it("returns to sign-in when the session expires", async () => {
-    mockApi({
-      "GET /health": () => json(HEALTHY),
-      "GET /api/v1/auth/session": () => json(SESSION),
-      "GET /api/v1/projects": unauthorized,
-    });
+    mockApi({ ...signedIn, "GET /api/v1/projects": unauthorized });
     render(<App />);
     expect(await screen.findByText("Your session has expired.")).toBeInTheDocument();
   });
@@ -143,9 +142,9 @@ describe("authentication", () => {
   it("never persists credentials in web storage or script-visible cookies", async () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem");
     mockApi({
-      "GET /health": () => json(HEALTHY),
+      ...signedIn,
+      "GET /api/v1/auth/session": unauthorized,
       "POST /api/v1/auth/session": () => json(SESSION),
-      "GET /api/v1/projects": () => json(PROJECTS),
     });
     render(<App loginCode="one-time-code" />);
     await screen.findByText("acme");
@@ -154,6 +153,80 @@ describe("authentication", () => {
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
     expect(document.cookie).toBe("");
+  });
+});
+
+describe("console", () => {
+  it("shows summary tiles from scan history", async () => {
+    const scan = (id: number, status: string, open_ports = 0) => ({
+      id,
+      project_id: 1,
+      tool: "nmap",
+      name: "nmap scan",
+      status,
+      targets: ["10.0.0.5"],
+      scan_addresses: ["10.0.0.5"],
+      options: {},
+      command: [],
+      actor: "cli",
+      timeout_seconds: 1800,
+      created_at: "2026-11-08T12:00:00Z",
+      started_at: null,
+      finished_at: null,
+      exit_code: null,
+      error: null,
+      tool_version: null,
+      evidence: null,
+      hosts_up: 1,
+      open_ports,
+    });
+    mockApi({
+      ...signedIn,
+      [SCANS_LIST]: () => json([scan(3, "running"), scan(2, "completed", 4), scan(1, "completed", 2)]),
+    });
+    render(<App />);
+
+    const summary = await screen.findByLabelText("Summary");
+    const tile = (label: string) => within(summary).getByText(label).closest(".stat");
+    await waitFor(() => expect(tile("Open ports found")).toHaveTextContent("Open ports found6"));
+    expect(tile("Active scans")).toHaveTextContent("Active scans1");
+    expect(within(summary).getByText("1 running · 0 queued")).toBeInTheDocument();
+    expect(within(summary).getByText("2 completed · 0 failed")).toBeInTheDocument();
+    expect(within(screen.getByRole("table", { name: "Recent scans" })).getAllByRole("row")).toHaveLength(4);
+  });
+
+  it("navigates between views with linkable URLs", async () => {
+    mockApi({ ...signedIn, "GET /api/v1/projects/1/scope": () => json([]) });
+    render(<App />);
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+
+    fireEvent.click(within(nav).getByRole("link", { name: "Projects" }));
+    expect(await screen.findByRole("heading", { name: "Projects", level: 1 })).toBeInTheDocument();
+    expect(window.location.hash).toBe("#/projects");
+    expect(within(nav).getByRole("link", { name: "Projects" })).toHaveAttribute("aria-current", "page");
+
+    act(() => {
+      window.history.back();
+    });
+    expect(await screen.findByRole("heading", { name: "Overview", level: 1 })).toBeInTheDocument();
+  });
+
+  it("shows a project's authorized scope", async () => {
+    mockApi({
+      ...signedIn,
+      "GET /api/v1/projects/1/scope": () =>
+        json([
+          { id: 1, project_id: 1, kind: "include", value: "10.0.0.0/24", note: null, created_at: "2026-11-08T10:00:00Z" },
+          { id: 2, project_id: 1, kind: "exclude", value: "10.0.0.13/32", note: "prod db", created_at: "2026-11-08T10:00:00Z" },
+        ]),
+    });
+    window.history.replaceState(null, "", "/#/projects");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open project acme" }));
+
+    const rules = await screen.findByRole("table", { name: "Scope rules" });
+    const rows = within(rules).getAllByRole("row").slice(1).map((r) => r.textContent);
+    expect(rows).toEqual(["include10.0.0.0/24", "exclude10.0.0.13/32prod db"]);
   });
 });
 
