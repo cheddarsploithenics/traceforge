@@ -291,8 +291,15 @@ class ScanJobManager:
         fields["tool_version"] = report.tool_version
         if report.error:
             return "failed", {**fields, "error": _clean_text(f"{name} reported: {report.error}")}
+        fields["tool_version"] = report.tool_version
+        # Results and the "completed" status are committed together.
         await asyncio.to_thread(
-            self.results.store, job.scan_id, job.project_id, report, job.command.hostnames
+            self.results.complete_with_results,
+            job.scan_id,
+            job.project_id,
+            report,
+            job.command.hostnames,
+            **fields,
         )
         return "completed", fields
 

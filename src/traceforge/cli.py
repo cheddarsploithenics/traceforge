@@ -114,6 +114,30 @@ def _build_parser() -> argparse.ArgumentParser:
     cancel = scan.add_parser("cancel", parents=[client], help="Cancel a queued or running scan.")
     cancel.add_argument("scan_id", type=int)
 
+    compare = scan.add_parser(
+        "compare",
+        parents=[client],
+        help="Compare two completed scans of the same project.",
+        description="Lists confirmed changes (added/removed/changed) and inconclusive "
+        "observations (not scanned, host timed out, filtered, unknown coverage).",
+    )
+    compare.add_argument("baseline", type=int, help="earlier scan id (A)")
+    compare.add_argument("comparison", type=int, help="later scan id (B)")
+
+    asset = sub.add_parser("asset", help="Browse the asset inventory.").add_subparsers(
+        dest="action", required=True
+    )
+    asset_list = asset.add_parser("list", parents=[client], help="List discovered assets.")
+    asset_list.add_argument("--project", type=int, dest="project_id")
+    asset_list.add_argument("--search", help="address, hostname, service, product or port")
+    asset_list.add_argument(
+        "--all", action="store_true", help="include hosts that never answered (-Pn)"
+    )
+    asset_show = asset.add_parser(
+        "show", parents=[client], help="Show an asset's ports and history."
+    )
+    asset_show.add_argument("uid", help="asset id, e.g. ast_1a2b3c4d5e6f7a8b")
+
     sub.add_parser("version", help="Print the version and exit.")
     return parser
 
@@ -217,6 +241,8 @@ async def _run_client_command(args: argparse.Namespace, settings: Settings) -> i
 
         if args.command == "scan":
             return await _run_scan_command(client, args)
+        if args.command == "asset":
+            return await _run_asset_command(client, args)
 
         if args.action == "add":
             rule = await client.add_scope_rule(args.project_id, args.kind, args.value, args.note)
@@ -276,7 +302,95 @@ async def _run_scan_command(client: TraceForgeClient, args: argparse.Namespace) 
         print(f"Scan #{scan.id} {scan.status}")
         return 0
 
+    if args.action == "compare":
+        base, other = await client.get_scan(args.baseline), await client.get_scan(args.comparison)
+        if base.project_id is None or base.project_id != other.project_id:
+            print("traceforge: both scans must belong to the same project", file=sys.stderr)
+            return 1
+        result = await client.compare_scans(base.project_id, args.baseline, args.comparison)
+        _print_comparison(result)
+        return 0
+
     await _print_scan(client, args.scan_id)
+    return 0
+
+
+_CATEGORY_LABELS = {
+    "added": "ADDED",
+    "removed": "REMOVED",
+    "changed": "CHANGED",
+    "inconclusive": "INCONCLUSIVE",
+}
+
+
+def _print_comparison(result: Any) -> None:
+    a, b, summary = result.baseline, result.comparison, result.summary
+    print(f"Scan #{a.scan_id} → #{b.scan_id}  (project {result.project_id})")
+    for label, side in (("baseline  ", a), ("comparison", b)):
+        ports = ", ".join(f"{k} {v}" for k, v in (side.ports_scanned or {}).items()) or "unknown"
+        flags = " ".join(
+            f for f, on in (("-Pn", not side.host_discovery), ("-sV", side.service_detection)) if on
+        )
+        print(f"  {label}  #{side.scan_id}  ports {ports}  {flags}")
+    print(
+        f"  {summary.added} added · {summary.removed} removed · {summary.changed} changed · "
+        f"{summary.inconclusive} inconclusive · "
+        f"{summary.unchanged_open_ports} open port(s) unchanged"
+    )
+    for note in result.notes:
+        print(f"  note: {note}")
+    if not result.changes:
+        print("\nNo differences.")
+    current = None
+    for change in result.changes:
+        if change.category != current:
+            current = change.category
+            print(f"\n{_CATEGORY_LABELS[current]}")
+        where = change.address + (f" {change.port}/{change.protocol}" if change.port else "")
+        print(f"  {where:<28} {change.kind:<26} {change.detail}")
+
+
+async def _run_asset_command(client: TraceForgeClient, args: argparse.Namespace) -> int:
+    if args.action == "list":
+        assets = await client.list_assets(
+            args.project_id, args.search, include_unconfirmed=args.all
+        )
+        if not assets:
+            print("No assets yet. Run a scan: traceforge scan run PROJECT TARGET --wait")
+        for a in assets:
+            names = f" ({', '.join(a.hostnames)})" if a.hostnames else ""
+            services = ", ".join(f"{s.port}/{s.service_name or '?'}" for s in a.services)
+            print(
+                f"{a.uid}  {a.address}{names}  [{a.project_name}]  "
+                f"{a.open_ports} open: {services or '-'}  last seen {a.last_seen:%Y-%m-%d %H:%M}"
+                + ("" if a.confirmed else "  (never answered)")
+            )
+        return 0
+
+    asset = await client.get_asset(args.uid)
+    names = f" ({', '.join(asset.hostnames)})" if asset.hostnames else ""
+    print(f"{asset.uid}  {asset.address}{names}  project {asset.project_name}")
+    print(f"  first seen {asset.first_seen}   last seen {asset.last_seen}")
+    print(f"\n{'PORT':<10} {'STATE':<9} {'SERVICE':<14} {'ID':<11} {'VERSION':<30} LAST CHECKED")
+    for p in asset.ports:
+        version = " ".join(v for v in (p.service_product, p.service_version) if v)
+        print(
+            f"{p.port}/{p.protocol:<6} {p.state:<9} {p.service_name or '':<14} "
+            f"{p.identification or '':<11} {version:<30} {p.last_seen:%Y-%m-%d %H:%M} "
+            f"(scan #{p.state_scan_id})"
+        )
+    print("\nOBSERVATIONS (newest first)")
+    for o in asset.observations:
+        prov = o.provenance
+        evidence = (
+            f"{prov.evidence.file} sha256 {prov.evidence.sha256[:16]}…" if prov.evidence else "-"
+        )
+        print(
+            f"  scan #{o.scan_id}  {o.observed_at:%Y-%m-%d %H:%M:%S}  "
+            f"{prov.tool} {prov.tool_version}  "
+            f"requested {', '.join(prov.requested_targets) or '-'} → {prov.scanned_address}  "
+            f"{len([p for p in o.ports if p.state == 'open'])} open  evidence {evidence}"
+        )
     return 0
 
 

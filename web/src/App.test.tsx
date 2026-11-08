@@ -183,12 +183,15 @@ describe("console", () => {
     mockApi({
       ...signedIn,
       [SCANS_LIST]: () => json([scan(3, "running"), scan(2, "completed", 4), scan(1, "completed", 2)]),
+      "GET /api/v1/assets/stats": () =>
+        json({ assets: 3, unconfirmed: 1, assets_with_open_ports: 2, open_ports: 5, detected_services: 4 }),
     });
     render(<App />);
 
     const summary = await screen.findByLabelText("Summary");
     const tile = (label: string) => within(summary).getByText(label).closest(".stat");
-    await waitFor(() => expect(tile("Open ports found")).toHaveTextContent("Open ports found6"));
+    await waitFor(() => expect(tile("Assets")).toHaveTextContent("Assets32 with open ports"));
+    expect(tile("Open ports")).toHaveTextContent("Open ports54 service(s) detected by probing");
     expect(tile("Active scans")).toHaveTextContent("Active scans1");
     expect(within(summary).getByText("1 running · 0 queued")).toBeInTheDocument();
     expect(within(summary).getByText("2 completed · 0 failed")).toBeInTheDocument();

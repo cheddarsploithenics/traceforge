@@ -14,6 +14,7 @@ import { Sidebar } from "./layout/Sidebar";
 import { type HealthState, Topbar } from "./layout/Topbar";
 import { errorMessage } from "./lib/format";
 import { type Route, useRoute } from "./lib/route";
+import { AssetsPage } from "./pages/AssetsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { ScansPage } from "./pages/ScansPage";
@@ -29,7 +30,12 @@ type ProjectsState =
   | { kind: "ready"; projects: Project[] }
   | { kind: "error"; message: string };
 
-const TITLES: Record<Route, string> = { overview: "Overview", scans: "Scans", projects: "Projects" };
+const TITLES: Record<Route, string> = {
+  overview: "Overview",
+  assets: "Assets",
+  scans: "Scans",
+  projects: "Projects",
+};
 
 export default function App({ loginCode = null }: { loginCode?: string | null }) {
   const [health, setHealth] = useState<HealthState>({ kind: "loading" });
@@ -37,6 +43,7 @@ export default function App({ loginCode = null }: { loginCode?: string | null })
   const [projects, setProjects] = useState<ProjectsState>({ kind: "loading" });
   const [route, navigate] = useRoute();
   const [focusScan, setFocusScan] = useState<number | null>(null);
+  const [focusAsset, setFocusAsset] = useState<string | null>(null);
 
   const refreshHealth = useCallback((signal?: AbortSignal) => {
     setHealth({ kind: "loading" });
@@ -127,7 +134,16 @@ export default function App({ loginCode = null }: { loginCode?: string | null })
   };
   const go = (next: Route) => {
     setFocusScan(null);
+    setFocusAsset(null);
     navigate(next);
+  };
+  const openScan = (id: number) => {
+    setFocusScan(id);
+    navigate("scans");
+  };
+  const openAsset = (uid: string) => {
+    setFocusAsset(uid);
+    navigate("assets");
   };
 
   return (
@@ -147,11 +163,9 @@ export default function App({ loginCode = null }: { loginCode?: string | null })
               projects={projectList}
               projectsError={projectsError}
               onRefreshHealth={() => refreshHealth()}
-              onOpenScan={(id) => {
-                setFocusScan(id);
-                navigate("scans");
-              }}
+              onOpenScan={openScan}
               onShowScans={() => go("scans")}
+              onShowAssets={() => go("assets")}
               onShowProjects={() => go("projects")}
               onUnauthorized={onUnauthorized}
             />
@@ -161,6 +175,16 @@ export default function App({ loginCode = null }: { loginCode?: string | null })
               key={focusScan ?? "all"}
               projects={projectList}
               initialScanId={focusScan}
+              onOpenAsset={openAsset}
+              onUnauthorized={onUnauthorized}
+            />
+          )}
+          {route === "assets" && (
+            <AssetsPage
+              key={focusAsset ?? "all"}
+              projects={projectList}
+              initialUid={focusAsset}
+              onOpenScan={openScan}
               onUnauthorized={onUnauthorized}
             />
           )}

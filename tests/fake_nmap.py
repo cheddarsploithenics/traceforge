@@ -5,7 +5,7 @@ its behaviour, and every invocation appends its argv to ``calls.jsonl`` (and its
 ``pids.txt``, its environment to ``env.json``) so tests can assert exactly
 what TraceForge executed and that the process is gone afterwards.
 
-Scenario keys:
+Scenario keys (scenario.json may also hold a list: one entry per invocation):
   mode: "ok" (default) | "sleep" | "fail" | "garbage" | "huge" | "xml" | "ignore-term"
   xml:  raw XML to print for mode "xml"
 """
@@ -21,8 +21,16 @@ HERE = Path(__file__).resolve().parent
 
 
 def scenario() -> dict:
+    """The scenario for this run. A JSON list is a queue: each run takes the next entry."""
     path = HERE / "scenario.json"
-    return json.loads(path.read_text()) if path.exists() else {}
+    if not path.exists():
+        return {}
+    config = json.loads(path.read_text())
+    if isinstance(config, list):
+        current, rest = (config[0] if config else {}), config[1:]
+        path.write_text(json.dumps(rest))
+        return current
+    return config
 
 
 def generate(argv: list[str]) -> str:
@@ -56,6 +64,7 @@ def generate(argv: list[str]) -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE nmaprun>\n'
         f'<nmaprun scanner="nmap" args="fake" version="7.99-fake">'
+        f'<scaninfo type="connect" protocol="tcp" services="{ports}"/>'
         f"{''.join(hosts)}"
         '<runstats><finished exit="success" elapsed="0.01"/></runstats></nmaprun>\n'
     )

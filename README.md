@@ -2,9 +2,11 @@
 
 Open-source, evidence-driven penetration testing orchestration platform for Kali Linux.
 
-> **Status: v0.2 (pre-alpha).** A hardened local API, a web dashboard, a terminal interface,
-> project-level authorized scope enforcement, and the first tool: **Nmap TCP connect scanning
-> with service detection**, run as background jobs with results and raw evidence stored locally.
+> **Status: v0.3 (pre-alpha).** A hardened local API, a web dashboard, a terminal interface,
+> project-level authorized scope enforcement, **Nmap TCP connect scanning** with hash-verified
+> evidence, and new in v0.3: a **persistent asset inventory** with full provenance and a
+> **scan comparison engine** that separates confirmed changes from things a scan simply
+> did not observe.
 
 > **Legal notice:** TraceForge is intended for authorised security testing only. Only run it
 > against systems you own or have explicit written permission to test.
@@ -20,7 +22,8 @@ make demo
 ```
 
 Open the printed `http://127.0.0.1:5173/#code=…` link, go to **Scans → New scan**, and scan
-`127.0.0.1` on ports `2222,2223`. `make demo` adds a "Local lab" project whose only authorized
+`127.0.0.1` on ports `2222,2223`. The host then appears under **Assets**; scan again and use
+**Scans → Compare scans** to see what changed. `make demo` adds a "Local lab" project whose only authorized
 scope is `127.0.0.1/32`, plus a fake SSH service on `127.0.0.1:2222` to find, so nothing leaves
 your machine. Press **Ctrl+C** to stop everything.
 
@@ -204,7 +207,8 @@ traceforge tui
 traceforge tui --api-url http://127.0.0.1:8080
 ```
 
-Keys: `o` overview, `s` scans, `r` refresh, `q` quit. Everything refreshes automatically every
+Keys: `o` overview, `s` scans, `a` assets, `d` compare (`c` compares the highlighted scan
+with the previous one), `r` refresh, `q` quit. Everything refreshes automatically every
 10 seconds.
 
 ### Projects and authorized scope (CLI)
@@ -250,7 +254,7 @@ Scan states are `queued → running → completed | failed | cancelled`. A faile
 (non-zero exit with Nmap's error output, timeout, unparseable output, …). Scans still active
 when the server stops are cancelled; any found active at startup are marked failed.
 
-- **Dashboard:** a console with three views in the sidebar.
+- **Dashboard:** a console with four views in the sidebar (Assets is described below).
   - **Overview:** headline counts, recent scans, platform status and projects.
   - **Scans:** history with status filters, project filter and search. Select a scan to open its
     detail panel (summary, ports and services, the exact command, evidence hash, evidence
@@ -259,7 +263,8 @@ when the server stops are cancelled; any found active at startup are marked fail
   - **Projects:** authorization references, testing windows, and each project's scope rules
     (read-only; scope is changed from the CLI).
 - **Terminal UI:** press `s` for the Scans tab (scan history; highlighting a scan shows its
-  results), `o` to return to the overview.
+  results), `a` for Assets, `d` for Compare (`c` on a scan compares it with the previous
+  completed scan of its project), `o` to return to the overview.
 - **API:** `POST /api/v1/projects/{id}/scans`, `GET /api/v1/scans`, `GET /api/v1/scans/{id}`,
   `GET /api/v1/scans/{id}/results`, `POST /api/v1/scans/{id}/cancel`, and
   `GET /api/v1/scans/{id}/evidence` (raw XML, verified against its SHA-256 before download).
@@ -298,6 +303,67 @@ traceforge scan run 1 127.0.0.2          # refused: outside scope, nothing runs
 traceforge tui                           # press s to browse the results
 ```
 
+### Asset inventory
+
+Every completed scan updates the project's **assets** — one per host per project, however
+often it is scanned, each with a stable identifier (`ast_…`). An asset shows:
+
+- address and hostnames, first and last time it **responded**;
+- every port ever seen open, with its **current** state (from the latest scan that actually
+  checked that port), the service name and version, and the scans those came from;
+- how each service was identified: **detected** (Nmap probed it, `-sV`) or **port label**
+  (only the conventional name for that port number — not evidence of what runs there);
+- the full **observation history**: for each scan, the tool and version, when it was
+  observed, the target the operator asked for and the address actually scanned (after DNS
+  pinning), the scan configuration, and the evidence file with its SHA-256.
+
+Evidence is referenced, not copied: one XML file per scan, re-verifiable at any time
+(`GET /api/v1/scans/{id}/evidence/verify`, or **Verify hash** in the dashboard).
+
+Rules that keep the inventory honest:
+
+- Only **completed** scans count. Failed and cancelled scans never change an asset.
+- A port's state only changes when a scan **checked that port**. If scan 1 saw 8080 open and
+  scan 2 only scanned 22, 8080 stays "open, last checked in scan 1".
+- With `-Pn`, Nmap reports every target as up even if nothing answered. Such hosts are kept
+  but marked *never answered* and hidden by default; a host counts as present only if some
+  port answered (open, or closed — a TCP reset is an answer).
+- An open port is an observation, not a vulnerability. TraceForge does not score or classify
+  findings.
+
+```bash
+traceforge asset list [--project 1] [--search ssh] [--all]
+traceforge asset show ast_9d0ac403fa30fb3a
+```
+
+API: `GET /api/v1/assets` (`project_id`, `q`, `include_unconfirmed`), `GET /api/v1/assets/stats`,
+`GET /api/v1/assets/{uid}`.
+
+### Comparing scans
+
+Compare two **completed** scans of the same project (dashboard: **Scans → Compare scans**, or
+**Compare with #N** in a scan's panel; TUI: `c` on a scan; CLI below). Every difference is in
+exactly one category:
+
+| Category | Meaning |
+| --- | --- |
+| **Added** | Confirmed by both scans: a port is now open that the baseline checked and found closed or filtered; a host now responds that the baseline targeted without an answer. |
+| **Removed** | Confirmed by both scans: an open port is now **closed** (a TCP reset), or a host that responded no longer does although the comparison scan targeted it. |
+| **Changed** | Both scans **detected** the service by probing and it differs: another service, or another version. |
+| **Inconclusive** | One side did not observe it, or the observation is ambiguous: the port was not scanned, the host timed out or was not targeted, coverage is unknown, the port is now *filtered* (no answer is not "closed"), or a port label was replaced by a real detection. |
+
+So if scan A saw 8080 open and scan B never checked 8080, the result is **inconclusive — not
+checked**, never "closed". Each result shows both scans' coverage (ports scanned, `-Pn`, `-sV`)
+side by side, plus notes such as "the baseline scan is newer". Comparisons are calculated on
+demand from the stored observations, so they always follow the same rules as the inventory.
+
+```bash
+traceforge scan compare 4 7        # baseline #4 → comparison #7
+```
+
+API: `GET /api/v1/projects/{project_id}/scans/compare?baseline=4&comparison=7`. A scan from
+another project is reported as not found; failed or cancelled scans are refused (`409`).
+
 #### Evidence and storage
 
 Nmap's XML output is streamed to `<evidence dir>/scan-<id>-nmap-<random>.xml` (file `0600`,
@@ -308,6 +374,20 @@ exit code and error. Parsed results go into `assets` (hosts per project, across 
 `scan_hosts` and `scan_ports` (port state and service name, product, version, extra info,
 CPEs). Service banners are controlled by the scanned host, so control characters are
 stripped at parse time and every interface renders them as plain text.
+
+Since v0.3 the database also records what each scan *covered* (the ports Nmap probed, from
+`<scaninfo>`), ports Nmap reported in bulk (`<extraports>`), and per-host timestamps and
+timeouts. The `assets` and `asset_ports` tables are derived from those observations and
+recomputed in the same transaction whenever a scan completes.
+
+#### Upgrading from v0.2
+
+Nothing to do: the first `v0.3` start applies an additive migration (new columns and one new
+table; no data is removed) and then re-reads the XML evidence of earlier scans to recover
+their coverage. Each evidence file is used **only if its SHA-256 still matches** the hash
+recorded at scan time; scans whose evidence is missing or altered keep "coverage unknown",
+which comparisons treat conservatively. Recorded hashes are never modified. The server log
+reports how many scans were updated.
 
 ### Running in a VM
 
@@ -405,8 +485,14 @@ Tests never scan external hosts:
   its argv, PID and environment, so the real job manager, subprocess handling, timeouts,
   cancellation and parsing are exercised without any network traffic.
 - **Integration tests** (`tests/test_nmap_integration.py`, marker `integration`) run the real
-  Nmap against a TCP listener the test starts on `127.0.0.1`, in a project whose only scope is
-  `127.0.0.1/32`. They are skipped when Nmap is not installed.
+  Nmap against listeners the test starts on `127.0.0.1` — a fake SSH service and a temporary
+  HTTP server that is stopped mid-test to verify "open → confirmed closed → not checked" across
+  the inventory and comparison engine — in a project whose only scope is `127.0.0.1/32`. They
+  are skipped when Nmap is not installed.
+- **Inventory and comparison tests** (`tests/test_inventory.py`, `tests/test_compare.py`,
+  `tests/test_assets_api.py`) build realistic Nmap XML (`tests/nmapxml.py`) for every case:
+  repeated scans, coverage gaps, bulk-reported ports, `-Pn`, timeouts, failed scans,
+  cross-project isolation, and the upgrade of a genuine v0.2 database.
 - An autouse guard in `tests/conftest.py` fails any test that tries to execute the real Nmap
   binary unless it is an integration test *and* every target is a single loopback address.
 
@@ -423,10 +509,11 @@ The same checks run in GitHub Actions ([`.github/workflows/ci.yml`](.github/work
 .
 ├── src/traceforge/
 │   ├── api/              FastAPI app factory, dependencies and routes
-│   │   └── routes/       health, auth, projects (scope + scan launch), scans
+│   │   └── routes/       health, auth, projects (scope, scan launch, compare), scans, assets
 │   ├── security/         request guard, token file, sessions, auth dependencies
 │   ├── execution/        scope policy, executor choke point, tool adapter contract,
 │   │                     nmap adapter + XML parser, background scan job manager
+│   ├── inventory/        observation model, asset derivation + v0.2 backfill, comparisons
 │   ├── db/               SQLite connection, migrations, repositories
 │   ├── tui/              Textual app, widgets and stylesheet
 │   ├── cli.py            `traceforge serve | tui | dashboard-link | project | scope | scan`
@@ -441,7 +528,7 @@ The same checks run in GitHub Actions ([`.github/workflows/ci.yml`](.github/work
 └── pyproject.toml
 ```
 
-## Limitations (v0.2)
+## Limitations (v0.3)
 
 - **TCP only, connect scan only.** No UDP, SYN, OS detection or NSE scripts. Connect scans are
   slower and more visible in target logs than SYN scans; that is deliberate.
@@ -458,16 +545,27 @@ The same checks run in GitHub Actions ([`.github/workflows/ci.yml`](.github/work
 - **Jobs live in the API process.** There is no persistent queue: stopping the server cancels
   active scans, and on the next start any scan left active is marked failed.
 - **No progress reporting.** Status is queued/running until Nmap exits.
-- **Results are per scan.** Hosts are tracked as project assets across scans, but there is no
-  diffing or finding management yet.
+- **Comparisons see only what Nmap reports.** Coverage comes from Nmap's own `<scaninfo>`;
+  bulk-reported ports are interpreted only when Nmap says which ports they are (or there is a
+  single bulk group). Otherwise the result is inconclusive, by design.
+- **"Removed" for hosts means "no longer responding"**, not "decommissioned": host discovery
+  can be blocked by a firewall, and under `-Pn` a host with every port filtered is
+  indistinguishable from an absent one.
+- **One asset per address per project.** Re-used addresses (DHCP, cloud) look like one asset;
+  hostnames are recorded but not used as identity.
+- **v0.2 scans without verifiable evidence** have unknown coverage: only ports they listed
+  individually take part in comparisons and state changes.
+- **No finding management.** TraceForge records observations; it does not rate risk, open
+  tickets, or mark ports as vulnerabilities.
 - **Evidence files are not deleted** with their scans; manage the evidence directory yourself.
 
 ## Roadmap
 
 - Scope management and the audit log in the dashboard and TUI
-- Asset inventory views and scan-to-scan diffs
+- Scheduled rescans of a project's scope, with a change feed built on the comparison engine
+- Findings: operator-confirmed notes and severity, linked to the observations that support them
 - Further adapters (HTTP probing, TLS inspection), each meeting the threat model's §8
-- Serving the built dashboard directly from the API
+- Report export (Markdown/HTML) with provenance and evidence hashes
 
 ## Contributing
 

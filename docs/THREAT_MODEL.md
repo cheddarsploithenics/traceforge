@@ -1,6 +1,7 @@
 # TraceForge threat model
 
-Status: applies to TraceForge 0.2 (local API hardening plus the first tool adapter, Nmap).
+Status: applies to TraceForge 0.3 (local API hardening, the Nmap adapter, and the asset
+inventory and scan comparison engine).
 Review this document whenever a new interface, endpoint or tool adapter is added.
 
 ## 1. System overview
@@ -47,7 +48,8 @@ the database or to tool execution.
 | Authority to launch tools | Highest value: a misuse turns the operator's machine into an attack platform against third parties. |
 | Scope definitions and authorization data | Define what is legal to test. Tampering could cause out-of-scope (unlawful) testing. |
 | Audit log | Evidence that scope was enforced; needed to defend the engagement afterwards. |
-| Engagement data (projects, scan results, raw evidence) | Confidential client information. |
+| Engagement data (projects, scan results, assets, raw evidence) | Confidential client information. |
+| Integrity of conclusions (asset state, scan comparisons) | Operators act on "port closed" or "host gone"; a wrong conclusion can hide exposure or misreport remediation to a client. |
 | API token, session cookies, sign-in codes | Grant all of the above. |
 
 ## 4. Threat actors
@@ -153,7 +155,27 @@ Every scan is audited: `launch.authorized` (actor, targets, pinned addresses, op
 `scan.started`, and `scan.completed | failed | cancelled` (exit code, reason, evidence hash),
 plus `scan.cancel_requested` with the requesting actor.
 
-### 5.6 Third-party code (A7)
+### 5.6 Asset inventory and scan comparison (A5, A8)
+
+`src/traceforge/inventory/` (model, store, compare) and `api/routes/assets.py`.
+
+| Threat | Mitigation | Verified by |
+| --- | --- | --- |
+| **Misleading conclusions**: a port reported closed (or a host gone) because a scan never looked | One interpretation model for inventory and comparisons: a port's state is known only if it was listed, or covered by `<scaninfo>` *and* placed by an unambiguous `<extraports>` group; otherwise "not observed" with the reason. Filtered ≠ closed. Comparisons label everything one side did not observe as *inconclusive*. | `test_compare.py` (`…never_reported_closed`, `…filtered_is_not_closed`, `…ambiguous_bulk_groups…`, `…unknown_coverage…`), mutation-checked |
+| `-Pn` making absent hosts look present | Hosts with reason `user-set` count as responsive only if a port answered (open or closed); otherwise the asset is *unconfirmed* and hidden by default. | `test_inventory.py::test_down_hosts_and_unanswered_pn_hosts…`, `test_compare.py::test_pn_without_any_answer` |
+| Failed, cancelled or interrupted scans producing "changes" | Asset state is derived only from **completed** scans; comparisons refuse other statuses (`409`). Results and the `completed` status are committed in **one transaction**, so a crash cannot leave half-ingested results. | `test_inventory.py::test_failed_or_cancelled…`, `…results_and_completion_are_atomic`, `test_compare.py::test_incomplete_scans…` |
+| Order-dependent or drifting derived data | Asset state is recomputed from all observations (never patched) in the ingesting transaction. | `test_inventory.py::test_ingestion_order_does_not_matter` |
+| Cross-project leakage | Comparisons are project-scoped (`/projects/{id}/scans/compare`); a scan of another project is reported as not found (no existence oracle). Observation queries join scans *and* assets on the same project. Assets are per project: the same IP in two engagements is two assets. | `test_compare.py::test_scans_from_another_project…`, `test_assets_api.py::test_cross_project_isolation…` |
+| Tampered evidence feeding the inventory during the v0.2 upgrade | Backfill re-parses an evidence file only if its SHA-256 matches the recorded hash (opened with `O_NOFOLLOW`, name must be a plain file name); otherwise coverage stays unknown. Recorded hashes are never rewritten. | `test_inventory.py::test_v02_database_is_upgraded…` |
+| Malicious XML (A8), now also from evidence files | Same hardened parser as scanning (entity declarations refused, size cap). Port specs from `<scaninfo>`/`<extrareasons>` are parsed strictly (regex, range-checked); malformed → "unknown", never "covered". | `test_nmap.py`, `PortSet` |
+| SQL injection via search/filters | Parameterised queries only; `LIKE` wildcards in user input are escaped; asset ids must match `^ast_[0-9a-f]{16}$`; search length capped. | `test_inventory.py::test_search`, `test_assets_api.py::test_asset_endpoint_validation` |
+| Target-controlled text in new views (A8) | Same as §5.5: sanitised at parse time; TUI cells are literal `Text`; React escapes. | `Assets.test.tsx` ("inertly"), `test_tui.py` |
+| Over-reading an observation as a vulnerability | No severity or vulnerability classification exists; the UI states that an open port is an observation, and distinguishes *detected* services from *port labels*. | `test_inventory.py::test_asset_created_from_nmap_xml` |
+
+All new endpoints are read-only `GET`s behind the existing authentication; scope enforcement
+is unchanged (assets come only from scans that passed it).
+
+### 5.7 Third-party code (A7)
 
 * `/docs` and `/openapi.json` are **disabled by default**. Swagger UI loads
   scripts from a CDN that would run on the API's origin. If enabled
@@ -208,7 +230,13 @@ codes.
   write to the now-closed stdout pipe fails (SIGPIPE) or it finishes. Its
   targets were already authorized; the scan is marked failed on the next start.
 * **Evidence files are protected by file permissions only** and are not
-  deleted with their scans.
+  deleted with their scans. A same-user process could replace an evidence
+  file; verification detects this but cannot restore the original.
+* **Comparisons trust Nmap's own coverage report.** If Nmap mis-reports what it
+  scanned, conclusions follow it. Bulk-reported ports are only interpreted
+  when unambiguous.
+* **Asset identity is the IP address per project.** Address re-use (DHCP,
+  cloud) merges distinct machines into one asset history.
 * **Audit log integrity relies on file permissions.** It is append-only by
   convention, not tamper-evident.
 * **`/health` is unauthenticated** and reveals the version string to local
@@ -238,6 +266,7 @@ mergeable unless it:
 .venv/bin/pytest tests/test_guard.py tests/test_auth.py tests/test_tokens.py \
                  tests/test_scope.py tests/test_executor.py tests/test_projects_api.py \
                  tests/test_nmap.py tests/test_jobs.py tests/test_scans_api.py \
+                 tests/test_inventory.py tests/test_compare.py tests/test_assets_api.py \
                  tests/test_nmap_integration.py
 cd web && npm test
 ```

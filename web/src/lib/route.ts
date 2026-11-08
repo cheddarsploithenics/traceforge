@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
  * without a router dependency. The sign-in code also travels in the fragment
  * (`#code=…`), but main.tsx consumes and scrubs it before the app renders.
  */
-export const ROUTES = ["overview", "scans", "projects"] as const;
+export const ROUTES = ["overview", "assets", "scans", "projects"] as const;
 export type Route = (typeof ROUTES)[number];
 
 function readRoute(): Route {

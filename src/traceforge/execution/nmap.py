@@ -20,13 +20,16 @@ import os
 import shutil
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
+from traceforge.execution.portset import PortSet
 from traceforge.execution.scope import AuthorizedTargets, InvalidTargetError
 from traceforge.execution.tools import (
+    ExtraPorts,
     HostResult,
     InvalidOptionsError,
     PortResult,
@@ -226,6 +229,42 @@ def _parse_port(element: ET.Element) -> PortResult | None:
     )
 
 
+def _iso_from_epoch(value: str | None) -> str | None:
+    seconds = _int(value)
+    if seconds is None or seconds <= 0:
+        return None
+    try:
+        moment = datetime.fromtimestamp(seconds, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _valid_spec(value: str | None) -> str | None:
+    """A port spec from tool output, normalised; None if absent or malformed."""
+    ports = PortSet.parse_or_none(value)
+    return str(ports) if ports is not None else None
+
+
+def _parse_extraports(element: ET.Element) -> ExtraPorts | None:
+    state = _clean(element.get("state"))
+    count = _int(element.get("count"))
+    if not state or count is None or count < 0:
+        return None
+    reasons = element.findall("extrareasons")
+    specs: dict[str, PortSet] = {}
+    known = bool(reasons)
+    for reason in reasons:
+        proto = _clean(reason.get("proto")) or "tcp"
+        ports = PortSet.parse_or_none(reason.get("ports"))
+        if ports is None:
+            known = False  # some of these ports are not identified
+            break
+        specs[proto] = specs[proto].union(ports) if proto in specs else ports
+    listed = tuple(sorted((proto, str(ports)) for proto, ports in specs.items()))
+    return ExtraPorts(state=state, count=count, ports=listed if known else None)
+
+
 def _parse_host(element: ET.Element) -> HostResult | None:
     address = next(
         (a for a in element.findall("address") if a.get("addrtype") in ("ipv4", "ipv6")), None
@@ -241,6 +280,9 @@ def _parse_host(element: ET.Element) -> HostResult | None:
         n for n in (_clean(h.get("name")) for h in element.findall("hostnames/hostname")) if n
     )
     ports = tuple(p for p in (_parse_port(e) for e in element.findall("ports/port")) if p)
+    extraports = tuple(
+        e for e in (_parse_extraports(x) for x in element.findall("ports/extraports")) if e
+    )
     return HostResult(
         address=addr,
         addr_type=address.get("addrtype", "ipv4"),
@@ -248,6 +290,9 @@ def _parse_host(element: ET.Element) -> HostResult | None:
         reason=_clean(status.get("reason")) if status is not None else None,
         hostnames=hostnames,
         ports=ports,
+        observed_at=_iso_from_epoch(element.get("endtime") or element.get("starttime")),
+        timed_out=element.get("timedout") == "true",
+        extraports=extraports,
     )
 
 
@@ -277,4 +322,16 @@ def parse_nmap_xml(data: bytes) -> ToolReport:
         error = _clean(finished.get("errormsg")) or "nmap reported an error"
 
     hosts = tuple(h for h in (_parse_host(e) for e in root.findall("host")) if h)
-    return ToolReport(hosts=hosts, tool_version=_clean(root.get("version")), error=error)
+    coverage: dict[str, PortSet] = {}
+    for info in root.findall("scaninfo"):
+        proto = _clean(info.get("protocol"))
+        ports = PortSet.parse_or_none(info.get("services"))
+        if proto and ports is not None:
+            # Several <scaninfo> elements for one protocol are merged.
+            coverage[proto] = coverage[proto].union(ports) if proto in coverage else ports
+    return ToolReport(
+        hosts=hosts,
+        tool_version=_clean(root.get("version")),
+        error=error,
+        coverage=tuple(sorted((p, str(ports)) for p, ports in coverage.items())),
+    )

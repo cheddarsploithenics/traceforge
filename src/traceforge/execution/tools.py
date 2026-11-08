@@ -54,6 +54,19 @@ class PortResult:
 
 
 @dataclass(frozen=True)
+class ExtraPorts:
+    """Ports reported in bulk rather than one by one (Nmap's ``<extraports>``).
+
+    ``ports`` lists them when the tool says which ports they are (as a port
+    spec, keyed by protocol); ``None`` means only the count is known.
+    """
+
+    state: str
+    count: int
+    ports: tuple[tuple[str, str], ...] | None = None
+
+
+@dataclass(frozen=True)
 class HostResult:
     address: str
     addr_type: str
@@ -61,6 +74,11 @@ class HostResult:
     reason: str | None = None
     hostnames: tuple[str, ...] = ()
     ports: tuple[PortResult, ...] = ()
+    # When the tool finished with this host (ISO 8601, UTC), if reported.
+    observed_at: str | None = None
+    # The tool gave up on this host, so its port data is incomplete.
+    timed_out: bool = False
+    extraports: tuple[ExtraPorts, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,6 +89,9 @@ class ToolReport:
     tool_version: str | None = None
     # The tool reported failure in its own output (e.g. nmap's exit="error").
     error: str | None = None
+    # Ports the tool was asked to scan, per protocol, as port specs. Empty
+    # when the output does not say (coverage unknown).
+    coverage: tuple[tuple[str, str], ...] = ()
 
 
 class ToolAdapter(Protocol):

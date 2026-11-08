@@ -216,6 +216,11 @@ class Scan(BaseModel):
     evidence: EvidenceRef | None
     hosts_up: int
     open_ports: int
+    ports_scanned: dict[str, str] | None = Field(
+        default=None,
+        description="Ports the scan probed, per protocol (e.g. {'tcp': '1-1024'}); "
+        "null when unknown.",
+    )
 
 
 class ScanPort(BaseModel):
@@ -235,6 +240,9 @@ class ScanPort(BaseModel):
 
 class ScanHost(BaseModel):
     asset_id: int
+    asset_uid: str | None = None
+    observed_at: datetime | None = None
+    timed_out: bool = False
     address: str
     addr_type: str
     state: str
@@ -246,3 +254,183 @@ class ScanHost(BaseModel):
 class ScanResults(BaseModel):
     scan: Scan
     hosts: list[ScanHost]
+
+
+# --- asset inventory (v0.3) --------------------------------------------------------
+
+Identification = Literal["detected", "port-label"]
+ASSET_UID_PATTERN = r"^ast_[0-9a-f]{16}$"
+
+
+class ServiceRef(BaseModel):
+    protocol: str
+    port: int
+    service_name: str | None
+    identification: Identification | None = Field(
+        description="'detected': Nmap probed and identified the service. 'port-label': only the "
+        "conventional service name for that port number."
+    )
+
+
+class AssetSummary(BaseModel):
+    uid: str = Field(description="Stable asset identifier.")
+    project_id: int
+    project_name: str
+    address: str
+    addr_type: str
+    hostnames: list[str]
+    first_seen: datetime = Field(description="First observation in which the host responded.")
+    last_seen: datetime = Field(description="Latest observation in which the host responded.")
+    confirmed: bool = Field(
+        description="False if the host was only ever assumed up (-Pn) without answering."
+    )
+    open_ports: int
+    last_scan_id: int | None
+    services: list[ServiceRef]
+
+
+class AssetPort(BaseModel):
+    """Current state of a port, derived from every observation of it."""
+
+    protocol: str
+    port: int
+    state: str = Field(description="State in the latest scan that observed this port.")
+    state_scan_id: int | None
+    first_seen: datetime
+    last_seen: datetime = Field(description="Latest scan that observed this port (any state).")
+    last_open_at: datetime | None
+    service_name: str | None
+    service_product: str | None
+    service_version: str | None
+    service_extrainfo: str | None
+    service_method: str | None
+    identification: Identification | None
+    service_confidence: int | None
+    cpe: list[str]
+    service_scan_id: int | None
+
+
+class ScanConfiguration(BaseModel):
+    options: dict[str, Any]
+    command: list[str]
+    timeout_seconds: int | None
+    ports_scanned: dict[str, str] | None
+    host_discovery: bool
+    service_detection: bool
+
+
+class Provenance(BaseModel):
+    """Where an observation came from, down to the evidence file and its hash."""
+
+    project_id: int
+    scan_id: int
+    tool: str | None
+    tool_version: str | None
+    observed_at: datetime
+    requested_targets: list[str] = Field(description="Targets the operator asked to scan.")
+    scanned_address: str = Field(description="Address the tool actually scanned.")
+    configuration: ScanConfiguration
+    evidence: EvidenceRef | None
+
+
+class ObservedPort(BaseModel):
+    protocol: str
+    port: int
+    state: str
+    reason: str | None
+    service_name: str | None
+    service_product: str | None
+    service_version: str | None
+    service_extrainfo: str | None
+    service_method: str | None
+    identification: Identification | None
+    cpe: list[str]
+
+
+class AssetObservation(BaseModel):
+    scan_id: int
+    observed_at: datetime
+    state: str
+    reason: str | None
+    responsive: bool
+    timed_out: bool
+    hostnames: list[str]
+    ports: list[ObservedPort] = Field(description="Ports the scan reported individually.")
+    provenance: Provenance
+
+
+class AssetDetail(AssetSummary):
+    ports: list[AssetPort]
+    observations: list[AssetObservation] = Field(description="Newest first.")
+
+
+class AssetStats(BaseModel):
+    assets: int
+    unconfirmed: int
+    assets_with_open_ports: int
+    open_ports: int
+    detected_services: int
+
+
+# --- scan comparison (v0.3) --------------------------------------------------------
+
+ChangeCategory = Literal["added", "removed", "changed", "inconclusive"]
+
+
+class ComparisonSide(BaseModel):
+    scan_id: int
+    status: ScanStatus
+    created_at: datetime
+    finished_at: datetime | None
+    tool: str | None
+    tool_version: str | None
+    targets: list[str]
+    scan_addresses: list[str]
+    ports_scanned: dict[str, str] | None
+    host_discovery: bool
+    service_detection: bool
+    hosts_responsive: int
+    evidence: EvidenceRef | None
+
+
+class ComparisonChange(BaseModel):
+    category: ChangeCategory = Field(
+        description="added/removed/changed are confirmed by observations in both scans; "
+        "inconclusive means one side did not observe it, or the observation is ambiguous."
+    )
+    kind: str
+    address: str
+    asset_uid: str | None
+    hostnames: list[str]
+    protocol: str | None
+    port: int | None
+    before: dict[str, Any] | None
+    after: dict[str, Any] | None
+    detail: str
+
+
+class ComparisonSummary(BaseModel):
+    added: int
+    removed: int
+    changed: int
+    inconclusive: int
+    unchanged_open_ports: int
+
+
+class ScanComparison(BaseModel):
+    project_id: int
+    baseline: ComparisonSide
+    comparison: ComparisonSide
+    summary: ComparisonSummary
+    changes: list[ComparisonChange]
+    notes: list[str]
+
+
+class EvidenceVerification(BaseModel):
+    scan_id: int
+    file: str
+    recorded_sha256: str
+    actual_sha256: str | None
+    size_bytes: int | None
+    verified: bool
+    detail: str

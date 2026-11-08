@@ -126,6 +126,7 @@ def _decode_scan(row: sqlite3.Row) -> dict[str, Any]:
         if scan.get("evidence_path") and scan.get("evidence_sha256")
         else None
     )
+    scan["ports_scanned"] = json.loads(scan["coverage"]) if scan.get("coverage") else None
     return scan
 
 
@@ -204,25 +205,65 @@ class ScanRepository:
         if status not in ("completed", "failed", "cancelled"):
             raise ValueError(f"{status!r} is not a terminal status")
         with self.db.connect() as conn:
-            cursor = conn.execute(
-                f"UPDATE scans SET status = ?, finished_at = {_NOW}, exit_code = ?, error = ?, "
-                "evidence_path = COALESCE(?, evidence_path), "
-                "evidence_sha256 = COALESCE(?, evidence_sha256), "
-                "evidence_bytes = COALESCE(?, evidence_bytes), "
-                "tool_version = COALESCE(?, tool_version) "
-                f"WHERE id = ? AND status IN {_ACTIVE}",
-                (
-                    status,
-                    exit_code,
-                    error,
-                    evidence_path,
-                    evidence_sha256,
-                    evidence_bytes,
-                    tool_version,
-                    scan_id,
-                ),
+            return self._finish(
+                conn,
+                scan_id,
+                status,
+                exit_code=exit_code,
+                error=error,
+                evidence_path=evidence_path,
+                evidence_sha256=evidence_sha256,
+                evidence_bytes=evidence_bytes,
+                tool_version=tool_version,
             )
-            return cursor.rowcount == 1
+
+    @staticmethod
+    def _finish(
+        conn: sqlite3.Connection,
+        scan_id: int,
+        status: str,
+        *,
+        exit_code: int | None = None,
+        error: str | None = None,
+        evidence_path: str | None = None,
+        evidence_sha256: str | None = None,
+        evidence_bytes: int | None = None,
+        tool_version: str | None = None,
+    ) -> bool:
+        from traceforge.inventory.store import refresh_assets
+
+        cursor = conn.execute(
+            f"UPDATE scans SET status = ?, finished_at = {_NOW}, exit_code = ?, error = ?, "
+            "evidence_path = COALESCE(?, evidence_path), "
+            "evidence_sha256 = COALESCE(?, evidence_sha256), "
+            "evidence_bytes = COALESCE(?, evidence_bytes), "
+            "tool_version = COALESCE(?, tool_version) "
+            f"WHERE id = ? AND status IN {_ACTIVE}",
+            (
+                status,
+                exit_code,
+                error,
+                evidence_path,
+                evidence_sha256,
+                evidence_bytes,
+                tool_version,
+                scan_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            return False
+        if status == "completed":
+            # Its observations now count: re-derive the assets it saw.
+            refresh_assets(
+                conn,
+                [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT asset_id FROM scan_hosts WHERE scan_id = ?", (scan_id,)
+                    )
+                ],
+            )
+        return True
 
     def fail_interrupted(self) -> list[int]:
         """Mark scans left active by a previous server process as failed."""
@@ -273,6 +314,31 @@ class ResultRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
+    def complete_with_results(
+        self,
+        scan_id: int,
+        project_id: int,
+        report: ToolReport,
+        hostnames: dict[str, list[str]] | None,
+        **finish: Any,
+    ) -> bool:
+        """Store a scan's results and mark it completed in one transaction.
+
+        Either both happen or neither: a crash can never leave results of a
+        scan that is not marked completed, or a completed scan without them.
+        Returns False (storing nothing) if the scan is no longer active.
+        """
+        from traceforge.inventory.store import ingest_report
+
+        with self.db.connect() as conn:
+            active = conn.execute(
+                "SELECT 1 FROM scans WHERE id = ? AND status IN ('queued', 'running')", (scan_id,)
+            ).fetchone()
+            if active is None:
+                return False
+            ingest_report(conn, scan_id, project_id, report, hostnames)
+            return ScanRepository._finish(conn, scan_id, "completed", **finish)
+
     def store(
         self,
         scan_id: int,
@@ -280,60 +346,18 @@ class ResultRepository:
         report: ToolReport,
         hostnames: dict[str, list[str]] | None = None,
     ) -> None:
-        """Persist a parsed report atomically."""
-        hostnames = hostnames or {}
+        """Persist a parsed report atomically (asset state counts it once the
+        scan is completed)."""
+        from traceforge.inventory.store import ingest_report
+
         with self.db.connect() as conn:
-            for host in report.hosts:
-                names = list(dict.fromkeys([*hostnames.get(host.address, []), *host.hostnames]))
-                conn.execute(
-                    "INSERT INTO assets (project_id, address, addr_type, hostnames) "
-                    "VALUES (?, ?, ?, ?) ON CONFLICT (project_id, address) DO UPDATE SET "
-                    f"last_seen = {_NOW}",
-                    (project_id, host.address, host.addr_type, json.dumps(names)),
-                )
-                asset = conn.execute(
-                    "SELECT id, hostnames FROM assets WHERE project_id = ? AND address = ?",
-                    (project_id, host.address),
-                ).fetchone()
-                merged = list(dict.fromkeys([*json.loads(asset["hostnames"]), *names]))
-                conn.execute(
-                    "UPDATE assets SET hostnames = ? WHERE id = ?",
-                    (json.dumps(merged), asset["id"]),
-                )
-                cursor = conn.execute(
-                    "INSERT INTO scan_hosts (scan_id, asset_id, state, reason, hostnames) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (scan_id, asset["id"], host.state, host.reason, json.dumps(names)),
-                )
-                conn.executemany(
-                    "INSERT OR REPLACE INTO scan_ports (scan_host_id, protocol, port, state, "
-                    "reason, service_name, service_product, service_version, "
-                    "service_extrainfo, service_tunnel, service_method, service_confidence, cpe) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [
-                        (
-                            cursor.lastrowid,
-                            p.protocol,
-                            p.port,
-                            p.state,
-                            p.reason,
-                            p.service_name,
-                            p.service_product,
-                            p.service_version,
-                            p.service_extrainfo,
-                            p.service_tunnel,
-                            p.service_method,
-                            p.service_confidence,
-                            json.dumps(list(p.cpe)),
-                        )
-                        for p in host.ports
-                    ],
-                )
+            ingest_report(conn, scan_id, project_id, report, hostnames)
 
     def for_scan(self, scan_id: int) -> list[dict[str, Any]]:
         with self.db.connect() as conn:
             hosts = conn.execute(
-                "SELECT h.id, h.asset_id, a.address, a.addr_type, h.state, h.reason, h.hostnames "
+                "SELECT h.id, h.asset_id, a.uid AS asset_uid, a.address, a.addr_type, h.state, "
+                "h.reason, h.hostnames, h.observed_at, h.timed_out "
                 "FROM scan_hosts h JOIN assets a ON a.id = h.asset_id "
                 "WHERE h.scan_id = ? ORDER BY h.id",
                 (scan_id,),
@@ -350,7 +374,12 @@ class ResultRepository:
             by_host.setdefault(entry.pop("scan_host_id"), []).append(entry)
         return [
             {
-                **{k: h[k] for k in ("asset_id", "address", "addr_type", "state", "reason")},
+                **{
+                    k: h[k]
+                    for k in ("asset_id", "asset_uid", "address", "addr_type", "state", "reason")
+                },
+                "observed_at": h["observed_at"],
+                "timed_out": bool(h["timed_out"]),
                 "hostnames": json.loads(h["hostnames"]),
                 "ports": by_host.get(h["id"], []),
             }

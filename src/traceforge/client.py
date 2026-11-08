@@ -18,10 +18,15 @@ from typing import Any
 import httpx
 
 from traceforge.schemas import (
+    AssetDetail,
+    AssetStats,
+    AssetSummary,
+    EvidenceVerification,
     HealthResponse,
     LoginCode,
     Project,
     Scan,
+    ScanComparison,
     ScanLaunchResult,
     ScanResults,
     ScopeCheckResponse,
@@ -185,6 +190,49 @@ class TraceForgeClient:
 
     async def cancel_scan(self, scan_id: int) -> Scan:
         return Scan.model_validate(await self._request("POST", f"/api/v1/scans/{scan_id}/cancel"))
+
+    # -- asset inventory & comparisons (v0.3) ---------------------------------------
+
+    async def list_assets(
+        self,
+        project_id: int | None = None,
+        query: str | None = None,
+        *,
+        include_unconfirmed: bool = False,
+        limit: int = 200,
+    ) -> list[AssetSummary]:
+        params: dict[str, Any] = {"limit": limit}
+        if project_id is not None:
+            params["project_id"] = project_id
+        if query:
+            params["q"] = query
+        if include_unconfirmed:
+            params["include_unconfirmed"] = "true"
+        data = await self._request("GET", "/api/v1/assets", params=params)
+        return [AssetSummary.model_validate(item) for item in data]
+
+    async def asset_stats(self, project_id: int | None = None) -> AssetStats:
+        params = {"project_id": project_id} if project_id is not None else {}
+        return AssetStats.model_validate(
+            await self._request("GET", "/api/v1/assets/stats", params=params)
+        )
+
+    async def get_asset(self, uid: str) -> AssetDetail:
+        return AssetDetail.model_validate(await self._request("GET", f"/api/v1/assets/{uid}"))
+
+    async def compare_scans(
+        self, project_id: int, baseline: int, comparison: int
+    ) -> ScanComparison:
+        data = await self._request(
+            "GET",
+            f"/api/v1/projects/{project_id}/scans/compare",
+            params={"baseline": baseline, "comparison": comparison},
+        )
+        return ScanComparison.model_validate(data)
+
+    async def verify_evidence(self, scan_id: int) -> EvidenceVerification:
+        data = await self._request("GET", f"/api/v1/scans/{scan_id}/evidence/verify")
+        return EvidenceVerification.model_validate(data)
 
     # -- lifecycle ----------------------------------------------------------------
 

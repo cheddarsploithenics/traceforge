@@ -7,6 +7,13 @@ const PATHS = {
   scans:
     "M12 3a9 9 0 1 0 9 9M12 7a5 5 0 1 0 5 5M12 12l7-7M12 11.5a.5.5 0 1 0 0 1 .5.5 0 1 0 0-1",
   projects: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+  assets: "M4 5h16v5H4zM4 14h16v5H4zM7.5 7.5h.01M7.5 16.5h.01",
+  compare: "M8 4v16M16 4v16M4 8h4M16 16h4M4 16l4-4M20 8l-4 4",
+  external: "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
+  plusSmall: "M12 7v10M7 12h10",
+  minusSmall: "M7 12h10",
+  tilde: "M5 13c2-3 4-3 7 0s5 3 7 0",
+  question: "M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17v.01",
   plus: "M12 5v14M5 12h14",
   refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
   close: "M6 6l12 12M18 6L6 18",

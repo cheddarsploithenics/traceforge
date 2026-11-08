@@ -13,6 +13,7 @@ import socket
 import threading
 import time
 from collections.abc import Iterator
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from fastapi.testclient import TestClient
@@ -161,3 +162,85 @@ async def test_guard_refuses_non_loopback_even_for_integration_tests(target: str
 
     with pytest.raises(pytest.fail.Exception, match="may only scan loopback"):
         await asyncio.create_subprocess_exec(NMAP, "-sT", "-n", "--", target)
+
+
+@pytest.fixture
+def http_server() -> Iterator[ThreadingHTTPServer]:
+    """A temporary HTTP server on an ephemeral 127.0.0.1 port (stop it to close the port)."""
+
+    class Quiet(SimpleHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_inventory_and_comparison_against_a_real_http_service(real_client, http_server) -> None:
+    """Open → confirmed closed → not checked, with real Nmap, on 127.0.0.1 only."""
+    client, auth = real_client
+    pid = create_project(client, auth, ("include", "127.0.0.1/32"))
+    port = http_server.server_address[1]
+    options = {"timing": 4, "skip_host_discovery": True}
+
+    def scan(ports: str) -> dict:
+        launched = launch(
+            client,
+            auth,
+            pid,
+            ["127.0.0.1"],
+            options={**options, "ports": ports},
+            timeout_seconds=120,
+        )
+        result = wait_for_status(client, auth, launched["scan_id"], "completed", "failed")
+        assert result["status"] == "completed", result["error"]
+        return result
+
+    first = scan(str(port))
+    http_server.shutdown()
+    http_server.server_close()  # the port is now closed
+    second = scan(str(port))
+    other = socket.socket()
+    other.bind(("127.0.0.1", 0))
+    unrelated = other.getsockname()[1]
+    other.close()
+    third = scan(str(unrelated))  # never checks the HTTP port
+
+    url = f"/api/v1/projects/{pid}/scans/compare"
+    closed = client.get(f"{url}?baseline={first['id']}&comparison={second['id']}", headers=auth)
+    assert [(c["category"], c["kind"], c["port"]) for c in closed.json()["changes"]] == [
+        ("removed", "port_closed", port)
+    ]
+    unchecked = client.get(
+        f"{url}?baseline={first['id']}&comparison={third['id']}", headers=auth
+    ).json()
+    assert [(c["category"], c["kind"], c["port"]) for c in unchecked["changes"]] == [
+        ("inconclusive", "port_not_checked", port)
+    ]
+    assert unchecked["summary"]["removed"] == 0
+
+    (asset,) = client.get(f"/api/v1/assets?project_id={pid}", headers=auth).json()
+    detail = client.get(f"/api/v1/assets/{asset['uid']}", headers=auth).json()
+    http = next(p for p in detail["ports"] if p["port"] == port)
+    assert http["state"] == "closed"  # from the second scan; the third did not look
+    assert http["state_scan_id"] == second["id"]
+    assert http["last_open_at"] is not None
+    assert http["service_name"] == "http" and http["identification"] == "detected"
+    assert [o["scan_id"] for o in detail["observations"]] == [
+        third["id"],
+        second["id"],
+        first["id"],
+    ]
+    for observation in detail["observations"]:
+        prov = observation["provenance"]
+        assert prov["tool"] == "nmap" and prov["tool_version"]
+        assert prov["requested_targets"] == ["127.0.0.1"]
+        verify = client.get(f"/api/v1/scans/{prov['scan_id']}/evidence/verify", headers=auth)
+        assert verify.json()["verified"] is True
