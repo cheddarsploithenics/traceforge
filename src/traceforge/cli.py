@@ -79,6 +79,41 @@ def _build_parser() -> argparse.ArgumentParser:
     check.add_argument("project_id", type=int)
     check.add_argument("targets", nargs="+")
 
+    scan = sub.add_parser("scan", help="Run and inspect scans.").add_subparsers(
+        dest="action", required=True
+    )
+    run = scan.add_parser(
+        "run",
+        parents=[client],
+        help="Queue an Nmap TCP connect scan of authorized targets.",
+        description="Every target must be inside the project's authorized scope. "
+        "Hostnames are resolved once, checked, and scanned by IP address.",
+    )
+    run.add_argument("project_id", type=int)
+    run.add_argument("targets", nargs="+", help="IP, CIDR or hostname (must be in scope)")
+    ports = run.add_mutually_exclusive_group()
+    ports.add_argument("-p", "--ports", help="Port list, e.g. 22,80,443 or 1-1024")
+    ports.add_argument("--top-ports", type=int, help="Scan the N most common ports")
+    run.add_argument(
+        "--no-version", action="store_true", help="Skip service/version detection (-sV)"
+    )
+    run.add_argument("--timing", type=int, choices=[2, 3, 4], help="Timing template (default 3)")
+    run.add_argument(
+        "-Pn", "--skip-host-discovery", action="store_true", help="Treat all hosts as online"
+    )
+    run.add_argument("--timeout", type=int, help="Kill the scan after this many seconds")
+    run.add_argument("--wait", action="store_true", help="Wait for the scan and print results")
+    lst_scans = scan.add_parser("list", parents=[client], help="Scan history, newest first.")
+    lst_scans.add_argument("--project", type=int, dest="project_id")
+    lst_scans.add_argument(
+        "--status", choices=["queued", "running", "completed", "failed", "cancelled"]
+    )
+    lst_scans.add_argument("--limit", type=int, default=20)
+    show = scan.add_parser("show", parents=[client], help="Show a scan's status and results.")
+    show.add_argument("scan_id", type=int)
+    cancel = scan.add_parser("cancel", parents=[client], help="Cancel a queued or running scan.")
+    cancel.add_argument("scan_id", type=int)
+
     sub.add_parser("version", help="Print the version and exit.")
     return parser
 
@@ -180,6 +215,9 @@ async def _run_client_command(args: argparse.Namespace, settings: Settings) -> i
                 )
             return 0
 
+        if args.command == "scan":
+            return await _run_scan_command(client, args)
+
         if args.action == "add":
             rule = await client.add_scope_rule(args.project_id, args.kind, args.value, args.note)
             print(f"Added rule #{rule.id}: {rule.kind} {rule.value}")
@@ -198,6 +236,80 @@ async def _run_client_command(args: argparse.Namespace, settings: Settings) -> i
         return 0
 
 
+TERMINAL_STATUSES = ("completed", "failed", "cancelled")
+
+
+async def _run_scan_command(client: TraceForgeClient, args: argparse.Namespace) -> int:
+    if args.action == "run":
+        options: dict[str, Any] = {"service_detection": not args.no_version}
+        for key in ("ports", "top_ports", "timing"):
+            if (value := getattr(args, key)) is not None:
+                options[key] = value
+        if args.skip_host_discovery:
+            options["skip_host_discovery"] = True
+        launched = await client.launch_scan(
+            args.project_id, "nmap", args.targets, options=options, timeout_seconds=args.timeout
+        )
+        print(f"Queued scan #{launched.scan_id} of {', '.join(launched.scan_addresses)}")
+        if not args.wait:
+            print(f"  traceforge scan show {launched.scan_id}")
+            return 0
+        while (scan := await client.get_scan(launched.scan_id)).status not in TERMINAL_STATUSES:
+            await asyncio.sleep(1.0)
+        await _print_scan(client, scan.id)
+        return 0 if scan.status == "completed" else 1
+
+    if args.action == "list":
+        scans = await client.list_scans(args.project_id, args.status, args.limit)
+        if not scans:
+            print("No scans yet.")
+        for s in scans:
+            print(
+                f"#{s.id:<4} {s.status:<9}  project {s.project_id}  {s.tool}  "
+                f"{s.open_ports} open port(s)  {', '.join(s.targets)}  "
+                f"({s.created_at:%Y-%m-%d %H:%M})"
+            )
+        return 0
+
+    if args.action == "cancel":
+        scan = await client.cancel_scan(args.scan_id)
+        print(f"Scan #{scan.id} {scan.status}")
+        return 0
+
+    await _print_scan(client, args.scan_id)
+    return 0
+
+
+async def _print_scan(client: TraceForgeClient, scan_id: int) -> None:
+    results = await client.get_scan_results(scan_id)
+    scan = results.scan
+    print(f"Scan #{scan.id}  {scan.tool}  {scan.status.upper()}  (project {scan.project_id})")
+    print(f"  targets:  {', '.join(scan.targets)}")
+    print(f"  scanned:  {', '.join(scan.scan_addresses)}")
+    print(f"  command:  {' '.join(scan.command)}")
+    print(
+        f"  created:  {scan.created_at}  started: {scan.started_at}  finished: {scan.finished_at}"
+    )
+    if scan.error:
+        print(f"  error:    {scan.error}")
+    if scan.evidence:
+        print(f"  evidence: {scan.evidence.file}  sha256 {scan.evidence.sha256}")
+    if scan.status in TERMINAL_STATUSES and not results.hosts:
+        print("\nNo hosts found.")
+    if results.hosts:
+        print(f"\n{'HOST':<40} {'PORT':<10} {'STATE':<10} {'SERVICE':<14} VERSION")
+    for host in results.hosts:
+        label = host.address + (f" ({', '.join(host.hostnames)})" if host.hostnames else "")
+        if not host.ports:
+            print(f"{label:<40} {'-':<10} {host.state:<10}")
+        for p in host.ports:
+            version = " ".join(
+                v for v in (p.service_product, p.service_version, p.service_extrainfo) if v
+            )
+            port = f"{p.port}/{p.protocol}"
+            print(f"{label:<40} {port:<10} {p.state:<10} {p.service_name or '':<14} {version}")
+
+
 def _seconds_until(moment: Any) -> int:
     from datetime import UTC, datetime
 
@@ -213,7 +325,14 @@ def _client_command(args: argparse.Namespace, settings: Settings) -> int:
         print(f"traceforge: {exc}", file=sys.stderr)
         return 1
     except ApiError as exc:
-        print(f"traceforge: request failed ({exc.status_code}): {exc.detail}", file=sys.stderr)
+        detail = exc.detail
+        if isinstance(detail, dict) and "decisions" in detail:
+            print(f"traceforge: {detail.get('message', 'denied')}", file=sys.stderr)
+            for d in detail["decisions"]:
+                verdict = "ALLOW" if d.get("allowed") else "DENY "
+                print(f"  {verdict}  {d.get('target')}  ({d.get('reason')})", file=sys.stderr)
+        else:
+            print(f"traceforge: request failed ({exc.status_code}): {detail}", file=sys.stderr)
         return 1
 
 

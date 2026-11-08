@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_HOST = "127.0.0.1"
@@ -133,6 +133,32 @@ class Settings(BaseSettings):
         description="Serve /docs and /openapi.json. Off by default (Swagger UI loads CDN scripts).",
     )
 
+    # --- scanning -------------------------------------------------------------
+    nmap_path: Path | None = Field(
+        default=None, description="Nmap executable. Defaults to `nmap` on PATH."
+    )
+    evidence_dir: Path | None = Field(
+        default=None,
+        description="Directory for raw tool output (owner-only). Defaults to <db dir>/evidence.",
+    )
+    scan_max_concurrent: int = Field(
+        default=2, ge=1, le=16, description="Scans that may run at the same time."
+    )
+    scan_max_queued: int = Field(
+        default=20, ge=0, le=500, description="Scans that may wait for a free slot."
+    )
+    scan_default_timeout_seconds: int = Field(default=1800, ge=10, le=86400)
+    scan_max_timeout_seconds: int = Field(default=4 * 3600, ge=10, le=7 * 86400)
+    scan_max_addresses: int = Field(
+        default=4096,
+        ge=1,
+        le=1 << 20,
+        description="Most IP addresses a single scan may cover (CIDR targets are expanded).",
+    )
+    scan_max_output_bytes: int = Field(
+        default=64 * 1024 * 1024, ge=1024, description="Abort a scan whose XML grows beyond this."
+    )
+
     @field_validator("host")
     @classmethod
     def _require_loopback(cls, value: str) -> str:
@@ -157,6 +183,16 @@ class Settings(BaseSettings):
     @classmethod
     def _origins_loopback(cls, value: list[str]) -> list[str]:
         return [normalize_loopback_origin(origin) for origin in value]
+
+    @model_validator(mode="after")
+    def _timeouts_consistent(self) -> Settings:
+        if self.scan_default_timeout_seconds > self.scan_max_timeout_seconds:
+            raise ValueError("scan_default_timeout_seconds exceeds scan_max_timeout_seconds")
+        return self
+
+    @property
+    def evidence_path(self) -> Path:
+        return self.evidence_dir or self.db_path.parent / "evidence"
 
     @property
     def base_url(self) -> str:

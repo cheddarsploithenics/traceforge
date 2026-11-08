@@ -22,7 +22,10 @@ A target is authorized when:
   a tool at internal infrastructure.
 
 The only way to obtain :class:`AuthorizedTargets` — the type every tool
-adapter must accept — is :meth:`ScopePolicy.authorize`.
+adapter must accept — is :meth:`ScopePolicy.authorize`. It records the exact
+addresses each hostname resolved to during the check ("DNS pinning"), so
+adapters can hand the tool those addresses instead of the name and close the
+window in which DNS could change between the check and the scan.
 """
 
 from __future__ import annotations
@@ -208,6 +211,8 @@ class ScopeDecision:
     target: str
     allowed: bool
     reason: str
+    # For hostnames: every address the name resolved to during this check.
+    addresses: tuple[str, ...] = ()
 
 
 _AUTHORIZATION_KEY = object()
@@ -224,6 +229,8 @@ class AuthorizedTargets:
 
     project_id: int
     targets: tuple[Target, ...]
+    # hostname -> addresses it resolved to when scope was checked.
+    resolved: tuple[tuple[str, tuple[IPAddress, ...]], ...] = ()
     _key: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -233,6 +240,14 @@ class AuthorizedTargets:
     def as_arguments(self) -> list[str]:
         """Targets as command-line arguments (never start with '-')."""
         return [str(target) for target in self.targets]
+
+    def pinned_addresses(self, hostname: str) -> tuple[IPAddress, ...]:
+        """Addresses ``hostname`` resolved to when it was authorized.
+
+        Empty if the hostname was authorized without a resolver; adapters must
+        then refuse to scan it rather than let the tool resolve it itself.
+        """
+        return dict(self.resolved).get(hostname, ())
 
 
 def system_resolver(hostname: str) -> list[IPAddress]:
@@ -291,22 +306,28 @@ class ScopePolicy:
             return ScopeDecision(name, True, f"matches authorized hostname {include} (unresolved)")
 
         try:
-            addresses = list(resolver(hostname))
-        except OSError as exc:
+            addresses = sorted(
+                {_canonical_ip(a) for a in resolver(hostname)}, key=lambda a: (a.version, a)
+            )
+        except (OSError, UnicodeError) as exc:
             return ScopeDecision(name, False, f"could not resolve hostname: {exc}")
         if not addresses:
             return ScopeDecision(name, False, "hostname did not resolve to any address")
+        resolved = tuple(str(a) for a in addresses)
         for address in addresses:
-            network = ipaddress.ip_network(_canonical_ip(address))
+            network = ipaddress.ip_network(address)
             if excluded := self._excluded(network):
-                return ScopeDecision(name, False, f"resolves to {address} in excluded {excluded}")
+                return ScopeDecision(
+                    name, False, f"resolves to {address} in excluded {excluded}", resolved
+                )
             if not address.is_global and not self._included(network):
                 return ScopeDecision(
                     name,
                     False,
                     f"resolves to non-public address {address} that is not explicitly in scope",
+                    resolved,
                 )
-        return ScopeDecision(name, True, f"matches authorized hostname {include}")
+        return ScopeDecision(name, True, f"matches authorized hostname {include}", resolved)
 
     def evaluate_all(
         self, targets: Sequence[Target], resolver: Resolver | None = None
@@ -324,4 +345,11 @@ class ScopePolicy:
         decisions = self.evaluate_all(targets, resolver)
         if not all(d.allowed for d in decisions):
             raise ScopeViolationError(decisions)
-        return AuthorizedTargets(self.project_id, tuple(targets), _AUTHORIZATION_KEY)
+        resolved = tuple(
+            (str(t.hostname), tuple(ipaddress.ip_address(a) for a in d.addresses))
+            for t, d in zip(targets, decisions, strict=True)
+            if t.hostname is not None and d.addresses
+        )
+        return AuthorizedTargets(
+            self.project_id, tuple(targets), resolved=resolved, _key=_AUTHORIZATION_KEY
+        )

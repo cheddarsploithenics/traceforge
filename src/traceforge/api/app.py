@@ -9,10 +9,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from traceforge import __version__
-from traceforge.api.routes import auth, health, projects
+from traceforge.api.routes import auth, health, projects, scans
 from traceforge.config import Settings, get_settings
 from traceforge.db import Database
 from traceforge.execution.executor import Executor, Runner
+from traceforge.execution.jobs import ScanJobManager
+from traceforge.execution.nmap import NmapAdapter
 from traceforge.execution.scope import Resolver, system_resolver
 from traceforge.execution.tools import ToolRegistry
 from traceforge.security.guard import LocalRequestGuard
@@ -33,8 +35,9 @@ def create_app(
 ) -> FastAPI:
     """Build a configured FastAPI application.
 
-    ``tools``, ``runner`` and ``resolver`` are injection points for tests and
-    future tool adapters. By default no tools are registered.
+    ``tools``, ``runner`` and ``resolver`` are injection points for tests. By
+    default the Nmap adapter is registered and scans run in a background
+    :class:`ScanJobManager`.
     """
     settings = settings or get_settings()
     database = Database(settings.db_path)
@@ -43,10 +46,23 @@ def create_app(
         session_ttl=settings.session_ttl_seconds,
         login_code_ttl=settings.login_code_ttl_seconds,
     )
+    if tools is None:
+        tools = ToolRegistry(
+            [NmapAdapter(settings.nmap_path, max_addresses=settings.scan_max_addresses)]
+        )
+    jobs = ScanJobManager(
+        database,
+        evidence_dir=settings.evidence_path,
+        max_concurrent=settings.scan_max_concurrent,
+        max_queued=settings.scan_max_queued,
+        max_output_bytes=settings.scan_max_output_bytes,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         database.initialize()
+        if interrupted := jobs.recover():
+            logger.warning("Marked %d interrupted scan(s) as failed", len(interrupted))
         token_path = settings.token_path
         write_token_file(token_path, api_token)
         code, _ = sessions.issue_login_code()
@@ -60,6 +76,7 @@ def create_app(
         try:
             yield
         finally:
+            await jobs.shutdown()
             remove_token_file(token_path, api_token)
 
     app = FastAPI(
@@ -75,7 +92,15 @@ def create_app(
     app.state.database = database
     app.state.api_token = api_token
     app.state.sessions = sessions
-    app.state.executor = Executor(database, tools=tools, runner=runner, resolver=resolver)
+    app.state.jobs = jobs
+    app.state.executor = Executor(
+        database,
+        tools=tools,
+        runner=runner or jobs,
+        resolver=resolver,
+        default_timeout_seconds=settings.scan_default_timeout_seconds,
+        max_timeout_seconds=settings.scan_max_timeout_seconds,
+    )
 
     app.add_middleware(
         LocalRequestGuard,
@@ -88,4 +113,5 @@ def create_app(
     app.include_router(health.router)
     app.include_router(auth.router)
     app.include_router(projects.router)
+    app.include_router(scans.router)
     return app

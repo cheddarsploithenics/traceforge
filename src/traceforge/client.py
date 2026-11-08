@@ -21,7 +21,9 @@ from traceforge.schemas import (
     HealthResponse,
     LoginCode,
     Project,
+    Scan,
     ScanLaunchResult,
+    ScanResults,
     ScopeCheckResponse,
     ScopeRule,
 )
@@ -148,13 +150,41 @@ class TraceForgeClient:
         )
         return ScopeCheckResponse.model_validate(data)
 
-    async def launch_scan(self, project_id: int, tool: str, targets: list[str]) -> ScanLaunchResult:
-        data = await self._request(
-            "POST",
-            f"/api/v1/projects/{project_id}/scans",
-            json={"tool": tool, "targets": targets},
-        )
+    async def launch_scan(
+        self,
+        project_id: int,
+        tool: str,
+        targets: list[str],
+        *,
+        options: dict[str, Any] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> ScanLaunchResult:
+        body: dict[str, Any] = {"tool": tool, "targets": targets, "options": options or {}}
+        if timeout_seconds is not None:
+            body["timeout_seconds"] = timeout_seconds
+        data = await self._request("POST", f"/api/v1/projects/{project_id}/scans", json=body)
         return ScanLaunchResult.model_validate(data)
+
+    async def list_scans(
+        self, project_id: int | None = None, status: str | None = None, limit: int = 50
+    ) -> list[Scan]:
+        params: dict[str, Any] = {"limit": limit}
+        if project_id is not None:
+            params["project_id"] = project_id
+        if status is not None:
+            params["status"] = status
+        data = await self._request("GET", "/api/v1/scans", params=params)
+        return [Scan.model_validate(item) for item in data]
+
+    async def get_scan(self, scan_id: int) -> Scan:
+        return Scan.model_validate(await self._request("GET", f"/api/v1/scans/{scan_id}"))
+
+    async def get_scan_results(self, scan_id: int) -> ScanResults:
+        data = await self._request("GET", f"/api/v1/scans/{scan_id}/results")
+        return ScanResults.model_validate(data)
+
+    async def cancel_scan(self, scan_id: int) -> Scan:
+        return Scan.model_validate(await self._request("POST", f"/api/v1/scans/{scan_id}/cancel"))
 
     # -- lifecycle ----------------------------------------------------------------
 

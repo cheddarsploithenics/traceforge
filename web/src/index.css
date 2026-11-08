@@ -155,3 +155,162 @@ code {
   border-radius: 6px;
   padding: 0.35rem 0.6rem;
 }
+
+/* --- navigation ------------------------------------------------------------ */
+
+.layout--wide {
+  max-width: 72rem;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.tab[aria-current="page"] {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+/* --- scans ----------------------------------------------------------------- */
+
+.scan-form {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.6rem 1rem;
+  align-items: center;
+}
+
+.scan-form label {
+  color: var(--muted);
+}
+
+.scan-form input:not([type="checkbox"]),
+.scan-form select,
+.scan-form textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+}
+
+.scan-form textarea,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.scan-form__checks,
+.scan-form__actions,
+.scan-form .hint {
+  grid-column: 1 / -1;
+}
+
+.scan-form__checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+}
+
+.scan-form__checks label {
+  color: var(--text);
+}
+
+.hint--warn {
+  color: var(--pending);
+  margin: 0;
+}
+
+.scan-error {
+  margin-top: 1rem;
+  color: var(--error);
+}
+
+.decisions {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.decisions .allowed strong {
+  color: var(--ok);
+}
+
+.decisions .denied strong {
+  color: var(--error);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin-top: 0.75rem;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.table tr.is-selected td {
+  background: var(--bg);
+}
+
+.table td.actions {
+  white-space: nowrap;
+  display: flex;
+  gap: 0.4rem;
+}
+
+button.danger:hover:not(:disabled) {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border: 1px solid currentColor;
+}
+
+.badge--queued {
+  color: var(--pending);
+}
+
+.badge--running {
+  color: #58a6ff;
+}
+
+.badge--completed {
+  color: var(--ok);
+}
+
+.badge--failed {
+  color: var(--error);
+}
+
+.badge--cancelled {
+  color: var(--muted);
+}
+
+.results-empty {
+  color: var(--muted);
+}

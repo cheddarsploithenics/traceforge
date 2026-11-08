@@ -85,3 +85,27 @@ async def test_client_rejects_unexpected_status() -> None:
     async with TraceForgeClient("http://127.0.0.1:9", transport=transport) as client:
         with pytest.raises(BackendUnavailableError, match="HTTP 500"):
             await client.health()
+
+
+async def test_client_scan_methods(app: FastAPI, fake_nmap) -> None:
+    import asyncio
+
+    app.state.database.initialize()
+    fake_nmap.set_scenario("sleep")
+    async with asgi_client(app, lambda: app.state.api_token) as client:
+        project = await client.create_project("acme", "SOW-1")
+        await client.add_scope_rule(project.id, "include", "10.0.0.0/24")
+        launched = await client.launch_scan(
+            project.id, "nmap", ["10.0.0.5"], options={"ports": "22"}, timeout_seconds=60
+        )
+        assert launched.status == "queued"
+        while (await client.get_scan(launched.scan_id)).status != "running":
+            await asyncio.sleep(0.02)
+
+        cancelled = await client.cancel_scan(launched.scan_id)
+        assert cancelled.status == "cancelled"
+        assert cancelled.timeout_seconds == 60
+        assert [s.id for s in await client.list_scans(project_id=project.id)] == [cancelled.id]
+        assert await client.list_scans(status="running") == []
+        results = await client.get_scan_results(launched.scan_id)
+        assert results.scan.id == launched.scan_id and results.hosts == []

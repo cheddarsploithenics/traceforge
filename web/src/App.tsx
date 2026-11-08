@@ -12,6 +12,9 @@ import {
 import { type AuthState, AuthCard } from "./components/AuthCard";
 import { HealthCard, type HealthState } from "./components/HealthCard";
 import { type ProjectsState, ProjectsCard } from "./components/ProjectsCard";
+import { ScansPage } from "./components/ScansPage";
+
+type View = "overview" | "scans";
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -19,6 +22,7 @@ export default function App({ loginCode = null }: { loginCode?: string | null })
   const [health, setHealth] = useState<HealthState>({ kind: "loading" });
   const [auth, setAuth] = useState<AuthState>({ kind: "checking" });
   const [projects, setProjects] = useState<ProjectsState>({ kind: "loading" });
+  const [view, setView] = useState<View>("overview");
 
   const refreshHealth = useCallback((signal?: AbortSignal) => {
     setHealth({ kind: "loading" });
@@ -88,23 +92,55 @@ export default function App({ loginCode = null }: { loginCode?: string | null })
     handleAuth(signIn(code), "That sign-in code is invalid, expired or already used.");
   };
 
+  const onUnauthorized = useCallback(
+    () => setAuth({ kind: "signed-out", message: "Your session has expired." }),
+    [],
+  );
+
   const onSignOut = () => {
     signOut()
       .catch(() => undefined)
       .finally(() => setAuth({ kind: "signed-out" }));
   };
 
+  const signedIn = auth.kind === "signed-in";
+  const current: View = signedIn ? view : "overview";
+
   return (
-    <div className="layout">
+    <div className={current === "scans" ? "layout layout--wide" : "layout"}>
       <header className="masthead">
         <h1>TraceForge</h1>
         <p>Evidence-driven penetration testing orchestration</p>
+        {signedIn && (
+          <nav className="tabs" aria-label="Sections">
+            {(["overview", "scans"] as const).map((name) => (
+              <button
+                key={name}
+                type="button"
+                className="tab"
+                aria-current={current === name ? "page" : undefined}
+                onClick={() => setView(name)}
+              >
+                {name === "overview" ? "Overview" : "Scans"}
+              </button>
+            ))}
+          </nav>
+        )}
       </header>
       <main>
-        <HealthCard state={health} onRefresh={() => refreshHealth()} />
-        <AuthCard state={auth} onSignIn={onSignIn} onSignOut={onSignOut} />
-        {auth.kind === "signed-in" && <ProjectsCard state={projects} />}
-        <p className="note">Scanning is not available in this version.</p>
+        {current === "overview" && (
+          <>
+            <HealthCard state={health} onRefresh={() => refreshHealth()} />
+            <AuthCard state={auth} onSignIn={onSignIn} onSignOut={onSignOut} />
+            {signedIn && <ProjectsCard state={projects} />}
+          </>
+        )}
+        {current === "scans" && (
+          <ScansPage
+            projects={projects.kind === "ready" ? projects.projects : []}
+            onUnauthorized={onUnauthorized}
+          />
+        )}
       </main>
     </div>
   );

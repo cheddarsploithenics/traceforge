@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "traceforge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Open-source, evidence-driven penetration testing orchestration platform for Kali Linux"
 readme = "README.md"
 license = "Apache-2.0"
@@ -49,6 +49,9 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra"
+markers = [
+    "integration: runs the real nmap binary against a local loopback listener only",
+]
 filterwarnings = [
     # Upstream Starlette notice about its TestClient transport; not actionable here.
     "ignore:Using `httpx` with `starlette.testclient` is deprecated",

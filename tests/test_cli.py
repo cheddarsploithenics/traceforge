@@ -142,3 +142,41 @@ def test_serve_refuses_token_dir_owned_by_someone_else(
     monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
     assert main(["serve", "--db", str(tmp_path / "t.db")]) == 1
     assert "unsafe token directory" in capsys.readouterr().err
+
+
+def test_cli_scan_workflow(
+    app, fake_nmap, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _wire_cli_to_app(monkeypatch, app)
+    assert main(["project", "create", "acme", "--authorization-ref", "SOW-42"]) == 0
+    assert main(["scope", "add", "1", "include", "10.0.0.0/24"]) == 0
+    capsys.readouterr()
+
+    assert main(["scan", "run", "1", "10.0.0.5", "-p", "22,80", "--timing", "4", "--wait"]) == 0
+    out = capsys.readouterr().out
+    assert "Queued scan #1 of 10.0.0.5" in out
+    assert "COMPLETED" in out
+    assert "22/tcp" in out and "OpenSSH 9.6p1" in out
+    argv = fake_nmap.calls[0]
+    assert argv[argv.index("-p") + 1] == "22,80" and "-T4" in argv
+
+    assert main(["scan", "list"]) == 0
+    assert "#1    completed" in capsys.readouterr().out
+    assert main(["scan", "show", "1"]) == 0
+    assert "evidence: scan-1-nmap-" in capsys.readouterr().out
+
+    assert main(["scan", "run", "1", "10.0.0.6", "8.8.8.8"]) == 1
+    err = capsys.readouterr().err
+    assert "nothing was launched" in err
+    assert "ALLOW  10.0.0.6" in err and "DENY   8.8.8.8" in err
+    assert len(fake_nmap.calls) == 1
+
+    assert main(["scan", "cancel", "1"]) == 1
+    assert "already completed" in capsys.readouterr().err
+
+
+def test_cli_scan_options_are_validated(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        main(["scan", "run", "1", "10.0.0.5", "--timing", "1"])
+    with pytest.raises(SystemExit):
+        main(["scan", "run", "1", "10.0.0.5", "-p", "22", "--top-ports", "10"])

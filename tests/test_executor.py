@@ -15,13 +15,14 @@ from traceforge.execution.executor import (
     ToolUnavailableError,
     UnavailableRunner,
 )
+from traceforge.execution.jobs import ScanJob
 from traceforge.execution.scope import (
     AuthorizedTargets,
     InvalidTargetError,
     ScopeViolationError,
     parse_scope_rule,
 )
-from traceforge.execution.tools import ToolRegistry
+from traceforge.execution.tools import ToolCommand, ToolRegistry, ToolReport
 
 NOW = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
 
@@ -32,17 +33,26 @@ class RecordingTool:
     def __init__(self) -> None:
         self.calls: list[AuthorizedTargets] = []
 
-    def build_argv(self, targets: AuthorizedTargets) -> list[str]:
+    def parse_options(self, raw):
+        return dict(raw)
+
+    def build_command(self, targets: AuthorizedTargets, options) -> ToolCommand:
         self.calls.append(targets)
-        return ["probe", "--", *targets.as_arguments()]
+        args = targets.as_arguments()
+        return ToolCommand(argv=["probe", "--", *args], scan_addresses=args, options=options)
+
+    def parse_output(self, data: bytes) -> ToolReport:
+        return ToolReport()
 
 
 class RecordingRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[int, list[str]]] = []
+        self.jobs: list[ScanJob] = []
 
-    async def run(self, scan_id: int, argv: list[str]) -> None:
-        self.calls.append((scan_id, argv))
+    async def submit(self, job: ScanJob) -> None:
+        self.jobs.append(job)
+        self.calls.append((job.scan_id, job.command.argv))
 
 
 @pytest.fixture
@@ -84,7 +94,7 @@ async def test_in_scope_launch_reaches_tool_and_runner(executor, tool, runner) -
 
     assert tool.calls[0].as_arguments() == ["10.0.0.5", "10.0.0.6"]
     assert runner.calls == [(result.scan_id, ["probe", "--", "10.0.0.5", "10.0.0.6"])]
-    assert executor.scans.get(result.scan_id)["status"] == "running"
+    assert executor.scans.get(result.scan_id)["status"] == "queued"
     events = executor.audit.list_all(pid)
     assert events[-1]["action"] == "launch.authorized"
     assert events[-1]["detail"]["targets"] == ["10.0.0.5", "10.0.0.6"]
@@ -185,12 +195,12 @@ async def test_default_configuration_executes_nothing(db: Database) -> None:
 
 async def test_unavailable_runner_refuses() -> None:
     with pytest.raises(ToolUnavailableError):
-        await UnavailableRunner().run(1, ["true"])
+        await UnavailableRunner().submit(None)  # type: ignore[arg-type]
 
 
 async def test_runner_failure_marks_scan_failed(db: Database, tool) -> None:
     class Boom:
-        async def run(self, scan_id: int, argv: list[str]) -> None:
+        async def submit(self, job: ScanJob) -> None:
             raise RuntimeError("crashed")
 
     executor = Executor(db, tools=ToolRegistry([tool]), runner=Boom(), resolver=fake_resolver)

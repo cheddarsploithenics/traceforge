@@ -1,6 +1,6 @@
 # TraceForge threat model
 
-Status: applies to TraceForge 0.1 (local API hardening, before any tool execution).
+Status: applies to TraceForge 0.2 (local API hardening plus the first tool adapter, Nmap).
 Review this document whenever a new interface, endpoint or tool adapter is added.
 
 ## 1. System overview
@@ -25,8 +25,8 @@ Review this document whenever a new interface, endpoint or tool adapter is added
                                  │  3. Executor           (scope → tool)      │
                                  └───────┬──────────────────────┬─────────────┘
                                          ▼                      ▼
-                         SQLite (projects, scope,      (future) tool processes
-                         audit log, scan history)      → authorized targets only
+                         SQLite (projects, scope,      scan job manager → nmap
+                         audit log, scans, results)    → pinned, authorized IPs only
 ```
 
 Both interfaces are clients of the same API; there is no second code path to
@@ -47,7 +47,7 @@ the database or to tool execution.
 | Authority to launch tools | Highest value: a misuse turns the operator's machine into an attack platform against third parties. |
 | Scope definitions and authorization data | Define what is legal to test. Tampering could cause out-of-scope (unlawful) testing. |
 | Audit log | Evidence that scope was enforced; needed to defend the engagement afterwards. |
-| Engagement data (projects, future findings) | Confidential client information. |
+| Engagement data (projects, scan results, raw evidence) | Confidential client information. |
 | API token, session cookies, sign-in codes | Grant all of the above. |
 
 ## 4. Threat actors
@@ -61,6 +61,7 @@ the database or to tool execution.
 | A5 | Operator error | Typos in targets, overly broad scope, testing after the authorized window. |
 | A6 | Hostile or misconfigured DNS for an in-scope domain | Can make an in-scope hostname resolve to arbitrary addresses. |
 | A7 | Compromised third-party script | e.g. a CDN serving Swagger UI. |
+| A8 | Hostile scanned host | Controls every byte its services return: banners, version strings, hostnames in responses. Reaches TraceForge through Nmap's output. |
 
 ## 5. Threats and mitigations
 
@@ -127,7 +128,32 @@ exclusions cannot be bypassed.
 
 Verified by `test_scope.py`, `test_executor.py`, `test_projects_api.py`.
 
-### 5.5 Third-party code (A7)
+### 5.5 Tool execution: the Nmap adapter (A5, A6, A8)
+
+`src/traceforge/execution/nmap.py` (adapter) and `src/traceforge/execution/jobs.py`
+(job manager).
+
+| Threat | Mitigation | Verified by |
+| --- | --- | --- |
+| Shell or option injection through targets or options | `asyncio.create_subprocess_exec` with an argv list; no shell anywhere in the package (static AST check). Clients choose only fields of `NmapScanOptions` (`extra="forbid"`): port spec matched by a strict regex and range-checked, enums for timing. Targets are re-serialised from parsed objects and follow `--`. | `test_nmap.py` (options, exact argv, `test_no_shell_execution_anywhere_in_the_package`), `test_scans_api.py::test_invalid_requests_are_rejected_without_executing` |
+| **DNS rebinding / TOCTOU between scope check and scan** (A6) | Hostnames are resolved once, inside `ScopePolicy.authorize`; `AuthorizedTargets` carries those addresses and the adapter passes **only them** to Nmap, which runs with `-n` (no DNS). A hostname without pinned addresses is refused. | `test_scans_api.py::test_dns_rebinding_cannot_redirect_the_scan`, `test_nmap.py::test_hostnames_are_pinned_to_checked_addresses` |
+| Stealthy, evasive or privileged scanning | Always `-sT --unprivileged` (overrides the `--privileged` that Kali's `nmap` wrapper adds); `-T0`/`-T1`/`-T5`, decoys, fragmentation, NSE and raw flags are not expressible. | `test_nmap.py::test_optional_flags`, integration test asserts `type="connect"` |
+| Oversized scans | Addresses covered (CIDRs expanded) capped by `TRACEFORGE_SCAN_MAX_ADDRESSES`; per-scan timeout with a server maximum; XML output capped. | `test_nmap.py`, `test_jobs.py` |
+| Runaway or orphaned processes | Each scan runs in its own session; timeout, cancellation and shutdown send SIGTERM to the process group, then SIGKILL after a grace period. Signals are only sent while the leader is unreaped, so a recycled PID is never signalled. | `test_jobs.py` (timeout, cancel, ignore-SIGTERM, shutdown: process is gone) |
+| Resource exhaustion through many requests | Concurrency semaphore plus a bounded queue; excess launches get `429`. | `test_jobs.py::test_queue_limit`, `test_scans_api.py::test_queue_full_returns_429` |
+| Secrets leaking into tool processes, logs or evidence | Tools get a minimal environment (`PATH`, `HOME`, locale): no `TRACEFORGE_*`, tokens, cloud credentials or proxies. The API token is never on the command line. Stored errors are a sanitised, length-capped tail of stderr. | `test_jobs.py::test_tool_runs_with_a_minimal_environment` |
+| Tool writing to attacker-chosen paths | `-oX -`: XML goes to stdout and TraceForge creates the evidence file itself (`O_EXCL | O_NOFOLLOW`, `0600`, in a `0700` directory it owns). The working directory is the evidence directory. | `test_jobs.py::test_completed_scan_stores_results_and_evidence` |
+| Evidence tampering | SHA-256 and size recorded at write time; the download endpoint refuses a file whose hash no longer matches. | `test_scans_api.py::test_evidence_download_is_verified` |
+| Malicious XML (A8) | Entity declarations refused before parsing (no entity expansion); stdlib parser never fetches external entities; size cap. | `test_nmap.py::test_rejects_malformed_or_unsafe_xml` |
+| Target-controlled text attacking the UIs (A8) | Parser replaces non-printable characters (terminal escapes, bidi overrides) and caps field length. The TUI renders table cells as `rich.text.Text` (Textual parses plain `str` cells as markup, including `@click` actions) and escapes other text; React escapes everything; evidence downloads are `attachment` with the API's `default-src 'none'; sandbox` CSP. | `test_nmap.py::test_target_controlled_text_is_sanitised`, `test_tui.py::test_tui_scan_results_render_banners_literally`, `Scans.test.tsx` ("inert text") |
+| Unauthenticated or cross-site scan control | All scan routes use the existing authentication; launch and cancel are POSTs, so dashboard sessions need the CSRF token and an allowed `Origin`. | `test_scans_api.py` (auth, CSRF, cross-origin) |
+| A test suite scanning real hosts | Unit tests use a fake `nmap`; an autouse guard fails any test that executes the real binary unless it is marked `integration` and every target is a single loopback address. | `test_nmap.py::test_unit_tests_cannot_execute_real_nmap`, `test_nmap_integration.py::test_guard_refuses_non_loopback…` |
+
+Every scan is audited: `launch.authorized` (actor, targets, pinned addresses, options),
+`scan.started`, and `scan.completed | failed | cancelled` (exit code, reason, evidence hash),
+plus `scan.cancel_requested` with the requesting actor.
+
+### 5.6 Third-party code (A7)
 
 * `/docs` and `/openapi.json` are **disabled by default**. Swagger UI loads
   scripts from a CDN that would run on the API's origin. If enabled
@@ -169,17 +195,29 @@ codes.
 * **Sessions live in memory**; restarting the server signs the dashboard out.
   Single-process deployment only.
 * **Scope is checked at launch time.** Scope or window changes do not affect a
-  tool that is already running, and hostname resolution may change between
-  the check and the tool's own lookup (TOCTOU). Future adapters must pin
-  resolved addresses or re-validate (see §8).
+  tool that is already running; the operator must cancel it. (The DNS TOCTOU
+  window is closed for Nmap by pinning; see §5.5.)
+* **Hostname rules authorize the name's public addresses.** An in-scope domain
+  that resolves to a public address outside every network rule is scanned.
+  Non-public addresses need an explicit network rule and exclusions always
+  win, but a domain pointing at third-party infrastructure (CDN, SaaS) would
+  be scanned. Operators who need address-exact scope should use IP/CIDR rules.
+* **Scan jobs are in-process.** A clean shutdown cancels and kills every
+  scan. If the API process is killed abruptly (SIGKILL, crash), a running Nmap
+  is not signalled: it runs in its own session, so it continues until its next
+  write to the now-closed stdout pipe fails (SIGPIPE) or it finishes. Its
+  targets were already authorized; the scan is marked failed on the next start.
+* **Evidence files are protected by file permissions only** and are not
+  deleted with their scans.
 * **Audit log integrity relies on file permissions.** It is append-only by
   convention, not tamper-evident.
 * **`/health` is unauthenticated** and reveals the version string to local
   users.
 
-## 8. Requirements for future tool adapters (e.g. Nmap)
+## 8. Requirements for tool adapters
 
-An adapter is not mergeable unless it:
+The Nmap adapter (§5.5) meets all of these. Any future adapter is not
+mergeable unless it:
 
 1. accepts only `AuthorizedTargets` and builds an **argv list** (never
    `shell=True`), placing targets after `--` where the tool supports it;
@@ -198,6 +236,8 @@ An adapter is not mergeable unless it:
 
 ```bash
 .venv/bin/pytest tests/test_guard.py tests/test_auth.py tests/test_tokens.py \
-                 tests/test_scope.py tests/test_executor.py tests/test_projects_api.py
+                 tests/test_scope.py tests/test_executor.py tests/test_projects_api.py \
+                 tests/test_nmap.py tests/test_jobs.py tests/test_scans_api.py \
+                 tests/test_nmap_integration.py
 cd web && npm test
 ```
