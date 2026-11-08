@@ -4,7 +4,7 @@ PYTHON ?= python3
 VENV   ?= .venv
 BIN     = $(VENV)/bin
 
-.PHONY: help install install-backend install-web api tui web preview link test test-backend test-integration test-web lint format build-web
+.PHONY: help install install-backend install-web run run-prod demo api tui web preview link test test-backend test-integration test-web lint format build-web
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -19,13 +19,29 @@ install-backend:  ## Create .venv and install the Python package with dev extras
 install-web:  ## Install dashboard dependencies
 	cd web && npm ci
 
-api:  ## Run the API on http://127.0.0.1:8000
+run: $(BIN)/traceforge web/node_modules  ## Start API + dashboard in one terminal and print a sign-in link
+	$(BIN)/python scripts/run_local.py
+
+run-prod: $(BIN)/traceforge web/node_modules  ## Same, with the hardened production build (strict CSP)
+	$(BIN)/python scripts/run_local.py --prod
+
+demo: $(BIN)/traceforge web/node_modules  ## `make run` plus a loopback-only demo project and target
+	$(BIN)/python scripts/run_local.py --demo
+
+# First use on a fresh clone: install whatever is missing.
+$(BIN)/traceforge:
+	$(MAKE) install-backend
+
+web/node_modules:
+	$(MAKE) install-web
+
+api:  ## Run only the API on http://127.0.0.1:8000
 	$(BIN)/traceforge serve
 
 tui:  ## Run the terminal interface
 	$(BIN)/traceforge tui
 
-web:  ## Run the dashboard dev server on http://127.0.0.1:5173
+web:  ## Run only the dashboard dev server on http://127.0.0.1:5173
 	cd web && npm run dev
 
 preview: build-web  ## Serve the hardened production build on http://127.0.0.1:4173
@@ -33,6 +49,7 @@ preview: build-web  ## Serve the hardened production build on http://127.0.0.1:4
 
 link:  ## Print a single-use dashboard sign-in link
 	$(BIN)/traceforge dashboard-link
+
 
 test: test-backend test-web  ## Run all tests
 

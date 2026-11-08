@@ -31,6 +31,15 @@ export interface Project {
   scope_rule_count: number;
 }
 
+export interface ScopeRule {
+  id: number;
+  project_id: number;
+  kind: "include" | "exclude";
+  value: string;
+  note: string | null;
+  created_at: string;
+}
+
 export interface ScopeDecision {
   target: string;
   allowed: boolean;
@@ -271,6 +280,14 @@ export async function signOut(): Promise<void> {
 
 export function listProjects(signal?: AbortSignal): Promise<Project[]> {
   return request<Project[]>("/api/v1/projects", { signal });
+}
+
+export function listScope(projectId: number, signal?: AbortSignal): Promise<ScopeRule[]> {
+  return request<ScopeRule[]>(`/api/v1/projects/${projectId}/scope`, { signal });
+}
+
+export function evidenceUrl(scanId: number): string {
+  return `/api/v1/scans/${scanId}/evidence`;
 }
 
 export function launchScan(projectId: number, body: ScanLaunch): Promise<ScanLaunchResult> {

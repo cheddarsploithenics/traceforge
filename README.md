@@ -9,6 +9,24 @@ Open-source, evidence-driven penetration testing orchestration platform for Kali
 > **Legal notice:** TraceForge is intended for authorised security testing only. Only run it
 > against systems you own or have explicit written permission to test.
 
+## Quick start
+
+One command, one terminal. It installs dependencies on first use, starts the API and the
+dashboard, and prints a sign-in link:
+
+```bash
+git clone <your-fork-url> traceforge && cd traceforge
+make demo
+```
+
+Open the printed `http://127.0.0.1:5173/#code=…` link, go to **Scans → New scan**, and scan
+`127.0.0.1` on ports `2222,2223`. `make demo` adds a "Local lab" project whose only authorized
+scope is `127.0.0.1/32`, plus a fake SSH service on `127.0.0.1:2222` to find, so nothing leaves
+your machine. Press **Ctrl+C** to stop everything.
+
+Use `make run` for the same without the demo project and service. Requirements are listed
+[below](#requirements): Python 3.11+, Node.js 22.22+/24, and Nmap.
+
 ## Architecture
 
 ```
@@ -98,9 +116,36 @@ Or simply `make install`. Activate the virtualenv (`source .venv/bin/activate`) 
 
 ## Running
 
-Start the API first; the dashboard and the TUI both depend on it.
+### One terminal (recommended)
 
-### 1. API server
+```bash
+make run        # API + dashboard (dev server); prints a sign-in link
+make run-prod   # same, but builds the dashboard and serves it with the strict CSP (port 4173)
+make demo       # make run + a loopback-only demo project and target
+```
+
+These run `scripts/run_local.py`, which:
+
+1. checks that the ports (8000, 5173 or 4173, and 2222 for the demo) are free and that the
+   dependencies are installed, and says what to do if not;
+2. starts the API, waits for `/health`, then starts the dashboard and waits for it;
+3. prints one single-use sign-in link (`make link` prints another);
+4. streams both logs with `[api]` / `[web]` prefixes;
+5. on **Ctrl+C** stops the dashboard, then the API, which cancels running scans and removes its
+   token file.
+
+Use another API port with `.venv/bin/python scripts/run_local.py --api-port 8001` (add `--demo`
+or `--prod` as needed). The security model is unchanged: everything binds to `127.0.0.1`, and
+the dashboard still reaches the API same-origin through the Vite proxy.
+
+For the terminal UI, run `make tui` in a second terminal while `make run` is running.
+
+### Running the pieces separately
+
+Useful when working on one part. Start the API first; the dashboard and the TUI both depend on
+it.
+
+#### 1. API server
 
 ```bash
 traceforge serve                 # http://127.0.0.1:8000
@@ -125,7 +170,7 @@ traceforge serve --reload
 Use this rather than invoking `uvicorn` directly: the `traceforge` command is what enforces
 the loopback-only bind address.
 
-### 2. Web dashboard
+#### 2. Web dashboard
 
 ```bash
 cd web
@@ -150,7 +195,7 @@ The sign-in link points to `TRACEFORGE_DASHBOARD_URL` (default `http://127.0.0.1
 you use the preview server, set `TRACEFORGE_DASHBOARD_URL=http://127.0.0.1:4173` before
 starting the API.
 
-### 3. Terminal UI
+#### 3. Terminal UI
 
 In a second terminal:
 
@@ -162,7 +207,7 @@ traceforge tui --api-url http://127.0.0.1:8080
 Keys: `o` overview, `s` scans, `r` refresh, `q` quit. Everything refreshes automatically every
 10 seconds.
 
-### 4. Projects and authorized scope (CLI)
+### Projects and authorized scope (CLI)
 
 Nothing can be launched against a target unless a project explicitly authorizes it:
 
@@ -181,7 +226,7 @@ Scope rules accept IPv4/IPv6 addresses, CIDR networks, hostnames and `*.domain`
 wildcards. Over-broad includes (`0.0.0.0/0`, anything wider than IPv4 `/8` or IPv6 `/32`, or
 `*.com`) are rejected.
 
-### 5. Scanning
+### Scanning
 
 Scans are Nmap TCP connect scans (`-sT`) with optional service/version detection (`-sV`).
 They are queued and run in the background by the API server; at most
@@ -205,9 +250,14 @@ Scan states are `queued → running → completed | failed | cancelled`. A faile
 (non-zero exit with Nmap's error output, timeout, unparseable output, …). Scans still active
 when the server stops are cancelled; any found active at startup are marked failed.
 
-- **Dashboard:** sign in, then open **Scans**: pick a project, enter targets, start the scan,
-  and watch its status (it refreshes while scans are active). **Results** shows hosts, ports
-  and services; **Cancel** stops a queued or running scan.
+- **Dashboard:** a console with three views in the sidebar.
+  - **Overview:** headline counts, recent scans, platform status and projects.
+  - **Scans:** history with status filters, project filter and search. Select a scan to open its
+    detail panel (summary, ports and services, the exact command, evidence hash, evidence
+    download, **Cancel scan**). **New scan** opens the launch form, and scope denials are explained
+    target by target. The view refreshes while scans are active.
+  - **Projects:** authorization references, testing windows, and each project's scope rules
+    (read-only; scope is changed from the CLI).
 - **Terminal UI:** press `s` for the Scans tab (scan history; highlighting a scan shows its
   results), `o` to return to the overview.
 - **API:** `POST /api/v1/projects/{id}/scans`, `GET /api/v1/scans`, `GET /api/v1/scans/{id}`,
@@ -216,7 +266,16 @@ when the server stops are cancelled; any found active at startup are marked fail
 
 #### Trying it locally
 
-This scans only a throwaway listener on your own loopback interface:
+The quickest way is `make demo` (see [Quick start](#quick-start)). It is safe to re-run: it
+reuses the "Local lab" project and prints a fresh link. Then from another terminal you can
+also use the CLI against it:
+
+```bash
+.venv/bin/traceforge scan run 1 127.0.0.1 -p 2222,2223 --wait
+.venv/bin/traceforge scan run 1 127.0.0.2     # refused: outside scope, nothing runs
+```
+
+The same thing by hand, scanning only a throwaway listener on your own loopback interface:
 
 ```bash
 # Terminal 1
@@ -250,11 +309,42 @@ exit code and error. Parsed results go into `assets` (hosts per project, across 
 CPEs). Service banners are controlled by the scanned host, so control characters are
 stripped at parse time and every interface renders them as plain text.
 
+### Running in a VM
+
+TraceForge works the same inside a Linux VM, with one thing to know: it only listens on
+`127.0.0.1` **inside the VM**, by design. Opening `http://<vm-ip>:5173` from your host's
+browser will not work, and there is deliberately no setting to expose it on the network.
+
+Either use a browser inside the VM, or forward the dashboard port over SSH from your host:
+
+```bash
+# on the host (the VM needs an SSH server: sudo apt install openssh-server)
+ssh -L 5173:127.0.0.1:5173 user@<vm-ip>
+```
+
+Keep that SSH session open, run `make run` (or `make demo`) in the VM, and open the sign-in
+link (`http://127.0.0.1:5173/#code=…`) in your host's browser. Only port 5173 needs
+forwarding: the dashboard proxies API calls to the server inside the VM. If 5173 is already
+used on the host, the local port must still be 5173, because the dashboard's origin is part of
+the security checks.
+
+Fresh VM setup, for reference:
+
+```bash
+sudo apt install -y git python3-venv nmap     # nmap is preinstalled on Kali
+# plus Node.js 22.22+ or 24 (nodejs.org or nvm; distribution packages are often too old)
+git clone <your-fork-url> traceforge && cd traceforge
+make install
+```
+
 ### Make shortcuts
 
 ```
-make api     # API server
-make web     # dashboard dev server
+make run     # API + dashboard in one terminal, with a sign-in link
+make run-prod  # same, hardened production build
+make demo    # make run + loopback-only demo project and target
+make api     # API server only
+make web     # dashboard dev server only
 make tui     # terminal UI
 make link    # dashboard sign-in link
 make preview # hardened dashboard build on :4173
@@ -344,6 +434,7 @@ The same checks run in GitHub Actions ([`.github/workflows/ci.yml`](.github/work
 │   ├── config.py         settings and loopback enforcement
 │   └── schemas.py        response models shared across interfaces
 ├── docs/THREAT_MODEL.md  threat model and security requirements for tool adapters
+├── scripts/              run_local.py (one-terminal launcher), demo.py (loopback demo)
 ├── tests/                pytest suite
 ├── web/                  React + TypeScript dashboard (Vite, Vitest)
 ├── Makefile
