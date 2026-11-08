@@ -1,5 +1,9 @@
-Screen {
-    align: center middle;
+#tabs {
+    height: 1fr;
+}
+
+#overview {
+    align: center top;
 }
 
 #main {
@@ -24,4 +28,20 @@ Screen {
 
 .panel.-error {
     border: round $error;
+}
+
+#scan-list {
+    height: 1fr;
+    min-height: 6;
+    border: round $primary;
+}
+
+#scan-detail {
+    padding: 0 2;
+}
+
+#scan-results {
+    height: 2fr;
+    min-height: 6;
+    border: round $primary;
 }

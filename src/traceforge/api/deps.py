@@ -7,6 +7,7 @@ from fastapi import Request
 from traceforge.config import Settings
 from traceforge.db import Database
 from traceforge.execution.executor import Executor
+from traceforge.execution.jobs import ScanJobManager
 
 
 def get_database(request: Request) -> Database:
@@ -19,3 +20,7 @@ def get_app_settings(request: Request) -> Settings:
 
 def get_executor(request: Request) -> Executor:
     return request.app.state.executor
+
+
+def get_jobs(request: Request) -> ScanJobManager:
+    return request.app.state.jobs

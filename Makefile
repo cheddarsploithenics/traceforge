@@ -4,7 +4,7 @@ PYTHON ?= python3
 VENV   ?= .venv
 BIN     = $(VENV)/bin
 
-.PHONY: help install install-backend install-web api tui web preview link test test-backend test-web lint format build-web
+.PHONY: help install install-backend install-web api tui web preview link test test-backend test-integration test-web lint format build-web
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -36,8 +36,11 @@ link:  ## Print a single-use dashboard sign-in link
 
 test: test-backend test-web  ## Run all tests
 
-test-backend:  ## Run Python tests
+test-backend:  ## Run Python tests (integration tests scan only 127.0.0.1)
 	$(BIN)/pytest
+
+test-integration:  ## Run only the real-Nmap loopback integration tests
+	$(BIN)/pytest -m integration
 
 test-web:  ## Type-check and test the dashboard
 	cd web && npm run typecheck && npm test

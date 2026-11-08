@@ -119,13 +119,18 @@ def test_out_of_scope_launch_is_forbidden_and_audited(client: TestClient, auth: 
     assert audit[-1]["action"] == "launch.denied"
 
 
-def test_in_scope_launch_without_tool_adapters_is_501(client: TestClient, auth: dict) -> None:
-    pid = create_project(client, auth, ("include", "10.0.0.0/24"))
-    response = client.post(
-        f"/api/v1/projects/{pid}/scans",
-        json={"tool": "nmap", "targets": ["10.0.0.5"]},
-        headers=auth,
-    )
+def test_in_scope_launch_without_tool_adapters_is_501(settings) -> None:
+    from traceforge.execution.tools import ToolRegistry
+
+    app = create_app(settings, tools=ToolRegistry(), resolver=fake_resolver)
+    with TestClient(app, base_url=BASE_URL) as client:
+        auth = {"Authorization": f"Bearer {app.state.api_token}"}
+        pid = create_project(client, auth, ("include", "10.0.0.0/24"))
+        response = client.post(
+            f"/api/v1/projects/{pid}/scans",
+            json={"tool": "nmap", "targets": ["10.0.0.5"]},
+            headers=auth,
+        )
     assert response.status_code == 501
     assert "available: none" in response.json()["detail"]
 

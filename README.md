@@ -2,9 +2,9 @@
 
 Open-source, evidence-driven penetration testing orchestration platform for Kali Linux.
 
-> **Status: v0.1 (pre-alpha).** A hardened local API, a web dashboard, a terminal interface,
-> and project-level authorized scope enforcement. **No scanning tools are wired up yet:**
-> the execution layer exists, but no tool adapters are registered.
+> **Status: v0.2 (pre-alpha).** A hardened local API, a web dashboard, a terminal interface,
+> project-level authorized scope enforcement, and the first tool: **Nmap TCP connect scanning
+> with service detection**, run as background jobs with results and raw evidence stored locally.
 
 > **Legal notice:** TraceForge is intended for authorised security testing only. Only run it
 > against systems you own or have explicit written permission to test.
@@ -24,13 +24,17 @@ Open-source, evidence-driven penetration testing orchestration platform for Kali
               │  TraceForge API (FastAPI) │  bound to 127.0.0.1 only
               │  1. request guard         │  Host / Origin / no CORS
               │  2. authentication        │  token (TUI, CLI) | session (web)
-              │  3. executor              │  scope check before any tool
-              └─────────────┬─────────────┘
-                            ▼
-              ┌───────────────────────────┐
-              │  SQLite                   │  projects, scope, audit log,
-              │  traceforge.db            │  scan history
-              └───────────────────────────┘
+              │  3. executor              │  scope check + DNS pinning
+              │  4. scan job manager      │  queue, concurrency, timeouts
+              └──────┬──────────────┬─────┘
+                     ▼              ▼
+   ┌───────────────────────┐  ┌──────────────────────────┐
+   │  SQLite traceforge.db │  │  nmap -sT [-sV] -n       │  argv only, no shell,
+   │  projects, scope,     │  │  --unprivileged -oX - -- │  minimal environment
+   │  scans, assets, ports │  │  <pinned IPs>            │
+   │  services, audit log  │  └────────────┬─────────────┘
+   └───────────────────────┘               ▼
+                               evidence/scan-N-nmap-*.xml   0600, SHA-256 in SQLite
 ```
 
 Both interfaces are thin clients of the same HTTP API, so business logic lives in one place.
@@ -60,11 +64,19 @@ The full analysis is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md). In short:
   enforces the project's scope. Scope is deny-by-default, exclusions win, the authorization
   window is checked, and hostnames are resolved and checked. The result is recorded in an
   audit log *before* a tool is even looked up.
+- **DNS pinning.** A hostname is resolved once, during the scope check. Nmap is given the
+  exact addresses that were checked (never the name) and runs with `-n`, so a DNS change or
+  rebinding attack between the check and the scan cannot redirect it.
+- **Constrained tool execution.** Nmap runs from an argument vector (never a shell) built
+  only from an allowlisted options model: there is no way to pass raw flags. It always uses
+  TCP connect scanning (`-sT --unprivileged`, no raw packets), targets follow `--`, and the
+  process gets a minimal environment so server secrets are never inherited or logged.
 
 ## Requirements
 
 - Kali Linux (or any recent Linux)
 - Python 3.11+
+- Nmap (`sudo apt install nmap`; preinstalled on Kali). Root is not needed: scans use TCP connect.
 - Node.js 22.22+ or 24.15+ (24 LTS recommended) and npm, only for the web dashboard
 
 ## Installation
@@ -147,7 +159,8 @@ traceforge tui
 traceforge tui --api-url http://127.0.0.1:8080
 ```
 
-Keys: `r` refresh, `q` quit. The status refreshes automatically every 10 seconds.
+Keys: `o` overview, `s` scans, `r` refresh, `q` quit. Everything refreshes automatically every
+10 seconds.
 
 ### 4. Projects and authorized scope (CLI)
 
@@ -168,6 +181,75 @@ Scope rules accept IPv4/IPv6 addresses, CIDR networks, hostnames and `*.domain`
 wildcards. Over-broad includes (`0.0.0.0/0`, anything wider than IPv4 `/8` or IPv6 `/32`, or
 `*.com`) are rejected.
 
+### 5. Scanning
+
+Scans are Nmap TCP connect scans (`-sT`) with optional service/version detection (`-sV`).
+They are queued and run in the background by the API server; at most
+`TRACEFORGE_SCAN_MAX_CONCURRENT` run at once and the rest wait as `queued`.
+
+```bash
+traceforge scan run 1 10.0.0.5 10.0.0.0/28 app.acme.example -p 22,80,443 --wait
+traceforge scan run 1 10.0.0.5 --top-ports 100 --timing 4 --no-version
+traceforge scan run 1 10.0.0.5 -Pn --timeout 600     # treat as online; kill after 10 min
+traceforge scan list [--project 1] [--status running]
+traceforge scan show 3                              # status, command, evidence, ports
+traceforge scan cancel 3                            # terminates the nmap process
+```
+
+Every target must be inside the project's scope, or the whole request is refused and nothing
+runs. Options are limited to: ports (`-p`) **or** top ports, service detection on/off, timing
+`-T2`…`-T4`, and `-Pn`. Stealth/evasion templates (`-T0`/`-T1`), SYN and other raw-packet
+scans, NSE scripts and free-form arguments are not available.
+
+Scan states are `queued → running → completed | failed | cancelled`. A failed scan records why
+(non-zero exit with Nmap's error output, timeout, unparseable output, …). Scans still active
+when the server stops are cancelled; any found active at startup are marked failed.
+
+- **Dashboard:** sign in, then open **Scans**: pick a project, enter targets, start the scan,
+  and watch its status (it refreshes while scans are active). **Results** shows hosts, ports
+  and services; **Cancel** stops a queued or running scan.
+- **Terminal UI:** press `s` for the Scans tab (scan history; highlighting a scan shows its
+  results), `o` to return to the overview.
+- **API:** `POST /api/v1/projects/{id}/scans`, `GET /api/v1/scans`, `GET /api/v1/scans/{id}`,
+  `GET /api/v1/scans/{id}/results`, `POST /api/v1/scans/{id}/cancel`, and
+  `GET /api/v1/scans/{id}/evidence` (raw XML, verified against its SHA-256 before download).
+
+#### Trying it locally
+
+This scans only a throwaway listener on your own loopback interface:
+
+```bash
+# Terminal 1
+traceforge serve
+
+# Terminal 2: a fake SSH service on 127.0.0.1:2222 (Ctrl+C to stop)
+python3 -c 'import socket,time
+s=socket.create_server(("127.0.0.1",2222))
+while True:
+    c,_=s.accept()
+    try: c.sendall(b"SSH-2.0-OpenSSH_9.6p1 Debian-3\r\n"); time.sleep(0.3)
+    except OSError: pass
+    c.close()'
+
+# Terminal 3
+traceforge project create "Local lab" --authorization-ref LAB-001
+traceforge scope add 1 include 127.0.0.1/32
+traceforge scan run 1 127.0.0.1 -p 2222,2223 --wait
+traceforge scan run 1 127.0.0.2          # refused: outside scope, nothing runs
+traceforge tui                           # press s to browse the results
+```
+
+#### Evidence and storage
+
+Nmap's XML output is streamed to `<evidence dir>/scan-<id>-nmap-<random>.xml` (file `0600`,
+directory `0700`). TraceForge creates the file itself (`-oX -`), so Nmap never writes to a
+path a client could influence. The database stores the file name, its SHA-256 and size, plus
+the scan's targets, the pinned addresses actually scanned, options, the exact argv, timestamps,
+exit code and error. Parsed results go into `assets` (hosts per project, across scans),
+`scan_hosts` and `scan_ports` (port state and service name, product, version, extra info,
+CPEs). Service banners are controlled by the scanned host, so control characters are
+stripped at parse time and every interface renders them as plain text.
+
 ### Make shortcuts
 
 ```
@@ -177,6 +259,7 @@ make tui     # terminal UI
 make link    # dashboard sign-in link
 make preview # hardened dashboard build on :4173
 make test    # all tests
+make test-integration  # real-Nmap tests against a 127.0.0.1 listener only
 make help    # everything else
 ```
 
@@ -196,6 +279,14 @@ All settings can be set with environment variables; CLI flags take precedence.
 | `TRACEFORGE_SESSION_TTL_SECONDS` | `28800` (8 h)                  | Dashboard session lifetime |
 | `TRACEFORGE_LOGIN_CODE_TTL_SECONDS` | `300`                       | Sign-in link lifetime |
 | `TRACEFORGE_ENABLE_DOCS` | `false`                                | Serve `/docs` and `/openapi.json` |
+| `TRACEFORGE_NMAP_PATH` | `nmap` on `PATH`                         | Absolute path to the Nmap binary |
+| `TRACEFORGE_EVIDENCE_DIR` | `<db dir>/evidence`                   | Raw tool output (owner-only) |
+| `TRACEFORGE_SCAN_MAX_CONCURRENT` | `2`                            | Scans running at once |
+| `TRACEFORGE_SCAN_MAX_QUEUED` | `20`                               | Scans waiting for a slot (beyond that: HTTP 429) |
+| `TRACEFORGE_SCAN_DEFAULT_TIMEOUT_SECONDS` | `1800`                | Per-scan time limit when none is given |
+| `TRACEFORGE_SCAN_MAX_TIMEOUT_SECONDS` | `14400`                   | Largest time limit a client may request |
+| `TRACEFORGE_SCAN_MAX_ADDRESSES` | `4096`                          | Most addresses one scan may cover (CIDRs expanded) |
+| `TRACEFORGE_SCAN_MAX_OUTPUT_BYTES` | `67108864`                   | Abort a scan whose XML output exceeds this |
 
 `XDG_DATA_HOME` defaults to `~/.local/share`. The database and its parent directory are
 created on first start.
@@ -213,9 +304,25 @@ make test
 which runs:
 
 ```bash
-.venv/bin/pytest                     # API, security, scope, executor, client, TUI, CLI
+.venv/bin/pytest                     # API, security, scope, executor, jobs, nmap, client, TUI, CLI
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
-cd web && npm run typecheck && npm test
+cd web && npm run typecheck && npm test && npm run build
+```
+
+Tests never scan external hosts:
+
+- **Unit tests** run a fake `nmap` (`tests/fake_nmap.py`) that prints canned XML and records
+  its argv, PID and environment, so the real job manager, subprocess handling, timeouts,
+  cancellation and parsing are exercised without any network traffic.
+- **Integration tests** (`tests/test_nmap_integration.py`, marker `integration`) run the real
+  Nmap against a TCP listener the test starts on `127.0.0.1`, in a project whose only scope is
+  `127.0.0.1/32`. They are skipped when Nmap is not installed.
+- An autouse guard in `tests/conftest.py` fails any test that tries to execute the real Nmap
+  binary unless it is an integration test *and* every target is a single loopback address.
+
+```bash
+.venv/bin/pytest -m integration       # only the real-Nmap loopback tests
+.venv/bin/pytest -m "not integration" # everything else
 ```
 
 The same checks run in GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
@@ -226,12 +333,13 @@ The same checks run in GitHub Actions ([`.github/workflows/ci.yml`](.github/work
 .
 ├── src/traceforge/
 │   ├── api/              FastAPI app factory, dependencies and routes
-│   │   └── routes/       health, auth, projects (scope + scan launch)
+│   │   └── routes/       health, auth, projects (scope + scan launch), scans
 │   ├── security/         request guard, token file, sessions, auth dependencies
-│   ├── execution/        scope policy, executor choke point, tool adapter registry
+│   ├── execution/        scope policy, executor choke point, tool adapter contract,
+│   │                     nmap adapter + XML parser, background scan job manager
 │   ├── db/               SQLite connection, migrations, repositories
 │   ├── tui/              Textual app, widgets and stylesheet
-│   ├── cli.py            `traceforge serve | tui | dashboard-link | project | scope`
+│   ├── cli.py            `traceforge serve | tui | dashboard-link | project | scope | scan`
 │   ├── client.py         async API client used by the TUI and CLI
 │   ├── config.py         settings and loopback enforcement
 │   └── schemas.py        response models shared across interfaces
@@ -242,11 +350,32 @@ The same checks run in GitHub Actions ([`.github/workflows/ci.yml`](.github/work
 └── pyproject.toml
 ```
 
+## Limitations (v0.2)
+
+- **TCP only, connect scan only.** No UDP, SYN, OS detection or NSE scripts. Connect scans are
+  slower and more visible in target logs than SYN scans; that is deliberate.
+- **One address family per scan.** Nmap scans IPv4 *or* IPv6 in a single run. Mixed explicit
+  targets are refused; for a hostname, the IPv4 addresses are scanned when the scan has no
+  explicit IPv6 targets (start a separate scan for its IPv6 addresses).
+- **Hostname rules authorize the name's public addresses.** If `*.acme.example` is in scope
+  and a name resolves to a public address not covered by any network rule, it is scanned
+  (non-public addresses always need an explicit network rule, and exclusions always win).
+  If a domain might point at third-party infrastructure (CDNs, SaaS), scope by IP/CIDR instead
+  or add exclusions.
+- **Scope is checked at launch.** Removing a scope rule or reaching the end of the authorized
+  window does not stop a scan that is already running; cancel it.
+- **Jobs live in the API process.** There is no persistent queue: stopping the server cancels
+  active scans, and on the next start any scan left active is marked failed.
+- **No progress reporting.** Status is queued/running until Nmap exits.
+- **Results are per scan.** Hosts are tracked as project assets across scans, but there is no
+  diffing or finding management yet.
+- **Evidence files are not deleted** with their scans; manage the evidence directory yourself.
+
 ## Roadmap
 
-- First tool adapter (Nmap), meeting the adapter requirements in the threat model
-- Scan history and audit log views in the dashboard and TUI
-- Scope management in the dashboard
+- Scope management and the audit log in the dashboard and TUI
+- Asset inventory views and scan-to-scan diffs
+- Further adapters (HTTP probing, TLS inspection), each meeting the threat model's §8
 - Serving the built dashboard directly from the API
 
 ## Contributing

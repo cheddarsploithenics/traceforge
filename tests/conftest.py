@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
+import json
 import os
+import shutil
 import socket
+import sys
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -45,9 +50,91 @@ def _isolate_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
 
 
+def _real_nmap_binaries() -> set[str]:
+    found = {
+        os.path.realpath(p) for p in ("/usr/lib/nmap/nmap", "/usr/bin/nmap") if os.path.exists(p)
+    }
+    if which := shutil.which("nmap"):
+        found.add(os.path.realpath(which))
+    return found
+
+
+REAL_NMAP = _real_nmap_binaries()
+
+
+def _is_loopback_target(value: str) -> bool:
+    try:
+        return ipaddress.ip_network(value, strict=False).network_address.is_loopback and (
+            ipaddress.ip_network(value, strict=False).num_addresses == 1
+        )
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _never_scan_real_hosts(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    """Safety net: no test may execute the real nmap against anything but loopback.
+
+    Unit tests use the fake nmap below. Only tests marked ``integration`` may run
+    the real binary, and only against single loopback addresses.
+    """
+    original = asyncio.create_subprocess_exec
+
+    async def guarded(program, *args, **kwargs):
+        if os.path.realpath(str(program)) in REAL_NMAP or Path(str(program)).name == "nmap":
+            if request.node.get_closest_marker("integration") is None:
+                pytest.fail(f"unit test tried to execute real nmap: {[program, *args]}")
+            argv = [str(a) for a in args]
+            targets = argv[argv.index("--") + 1 :] if "--" in argv else []
+            if not targets or not all(_is_loopback_target(t) for t in targets):
+                pytest.fail(f"integration test may only scan loopback, got {targets}")
+        return await original(program, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", guarded)
+
+
+@dataclass
+class FakeNmap:
+    """Handle on the fake nmap executable (see tests/fake_nmap.py)."""
+
+    path: Path
+
+    def set_scenario(self, mode: str = "ok", **extra: object) -> None:
+        (self.path.parent / "scenario.json").write_text(json.dumps({"mode": mode, **extra}))
+
+    @property
+    def pids(self) -> list[int]:
+        log = self.path.parent / "pids.txt"
+        return [int(line) for line in log.read_text().split()] if log.exists() else []
+
+    @property
+    def environment(self) -> dict[str, str]:
+        return json.loads((self.path.parent / "env.json").read_text())
+
+    @property
+    def calls(self) -> list[list[str]]:
+        log = self.path.parent / "calls.jsonl"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
 @pytest.fixture
-def settings(tmp_path: Path) -> Settings:
-    return Settings(db_path=tmp_path / "traceforge.db", token_file=tmp_path / "run" / "api.token")
+def fake_nmap(tmp_path: Path) -> FakeNmap:
+    directory = tmp_path / "fake-bin"
+    directory.mkdir()
+    path = directory / "fake-nmap"
+    source = (Path(__file__).parent / "fake_nmap.py").read_text()
+    path.write_text(f"#!{sys.executable}\n{source}")
+    path.chmod(0o700)
+    return FakeNmap(path)
+
+
+@pytest.fixture
+def settings(tmp_path: Path, fake_nmap: FakeNmap) -> Settings:
+    return Settings(
+        db_path=tmp_path / "traceforge.db",
+        token_file=tmp_path / "run" / "api.token",
+        nmap_path=fake_nmap.path,
+    )
 
 
 @pytest.fixture

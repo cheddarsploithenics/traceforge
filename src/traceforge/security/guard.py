@@ -36,7 +36,7 @@ SECURITY_HEADERS = {
     "cross-origin-resource-policy": "same-origin",
     "cache-control": "no-store",
 }
-API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; sandbox"
 
 
 def parse_host_header(value: str) -> tuple[str, int | None] | None:

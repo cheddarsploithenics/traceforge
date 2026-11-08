@@ -31,6 +31,99 @@ export interface Project {
   scope_rule_count: number;
 }
 
+export interface ScopeDecision {
+  target: string;
+  allowed: boolean;
+  reason: string;
+  addresses?: string[];
+}
+
+export type ScanStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export const ACTIVE_STATUSES: ReadonlySet<ScanStatus> = new Set(["queued", "running"]);
+
+/** Mirrors NmapScanOptions: the only options a client can choose. */
+export interface NmapScanOptions {
+  service_detection?: boolean;
+  ports?: string;
+  top_ports?: number;
+  timing?: 2 | 3 | 4;
+  skip_host_discovery?: boolean;
+}
+
+export interface ScanLaunch {
+  targets: string[];
+  tool?: string;
+  options?: NmapScanOptions;
+  timeout_seconds?: number;
+}
+
+export interface ScanLaunchResult {
+  scan_id: number;
+  tool: string;
+  targets: string[];
+  scan_addresses: string[];
+  status: ScanStatus;
+}
+
+export interface EvidenceRef {
+  file: string;
+  sha256: string;
+  size_bytes: number;
+}
+
+export interface Scan {
+  id: number;
+  project_id: number | null;
+  tool: string | null;
+  name: string;
+  status: ScanStatus;
+  targets: string[];
+  scan_addresses: string[];
+  options: Record<string, unknown>;
+  command: string[];
+  actor: string | null;
+  timeout_seconds: number | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  exit_code: number | null;
+  error: string | null;
+  tool_version: string | null;
+  evidence: EvidenceRef | null;
+  hosts_up: number;
+  open_ports: number;
+}
+
+export interface ScanPort {
+  protocol: string;
+  port: number;
+  state: string;
+  reason: string | null;
+  service_name: string | null;
+  service_product: string | null;
+  service_version: string | null;
+  service_extrainfo: string | null;
+  service_tunnel: string | null;
+  service_method: string | null;
+  service_confidence: number | null;
+  cpe: string[];
+}
+
+export interface ScanHost {
+  asset_id: number;
+  address: string;
+  addr_type: string;
+  state: string;
+  reason: string | null;
+  hostnames: string[];
+  ports: ScanPort[];
+}
+
+export interface ScanResults {
+  scan: Scan;
+  hosts: ScanHost[];
+}
+
 export const CSRF_HEADER = "X-TraceForge-CSRF";
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -38,6 +131,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number | null = null,
+    /** Per-target scope decisions when a launch was refused (HTTP 403). */
+    readonly decisions: ScopeDecision[] = [],
   ) {
     super(message);
     this.name = "ApiError";
@@ -87,14 +182,36 @@ async function send(
   }
 }
 
-async function errorDetail(response: Response): Promise<string> {
+interface ErrorInfo {
+  message: string;
+  decisions: ScopeDecision[];
+}
+
+function describe(detail: unknown, status: number): ErrorInfo {
+  if (typeof detail === "string") return { message: detail, decisions: [] };
+  // FastAPI validation errors: [{loc: [...], msg: "..."}]
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item: { loc?: unknown[]; msg?: string }) => {
+      const field = (item.loc ?? []).filter((p) => p !== "body").join(".");
+      return field ? `${field}: ${item.msg}` : String(item.msg);
+    });
+    return { message: parts.join("; ") || `HTTP ${status}`, decisions: [] };
+  }
+  // Scope denial: {message, decisions}
+  if (detail && typeof detail === "object" && "message" in detail) {
+    const { message, decisions } = detail as { message: unknown; decisions?: ScopeDecision[] };
+    return { message: String(message), decisions: Array.isArray(decisions) ? decisions : [] };
+  }
+  return { message: `HTTP ${status}`, decisions: [] };
+}
+
+async function errorInfo(response: Response): Promise<ErrorInfo> {
   try {
     const data = (await response.json()) as { detail?: unknown };
-    if (typeof data.detail === "string") return data.detail;
+    return describe(data.detail, response.status);
   } catch {
-    // fall through
+    return { message: `HTTP ${response.status}`, decisions: [] };
   }
-  return `HTTP ${response.status}`;
 }
 
 async function request<T>(
@@ -104,9 +221,12 @@ async function request<T>(
   const response = await send(path, init);
   if (response.status === 401) {
     csrfToken = null;
-    throw new UnauthorizedError(await errorDetail(response));
+    throw new UnauthorizedError((await errorInfo(response)).message);
   }
-  if (!response.ok) throw new ApiError(await errorDetail(response), response.status);
+  if (!response.ok) {
+    const info = await errorInfo(response);
+    throw new ApiError(info.message, response.status, info.decisions);
+  }
   return (response.status === 204 ? undefined : await response.json()) as T;
 }
 
@@ -151,6 +271,35 @@ export async function signOut(): Promise<void> {
 
 export function listProjects(signal?: AbortSignal): Promise<Project[]> {
   return request<Project[]>("/api/v1/projects", { signal });
+}
+
+export function launchScan(projectId: number, body: ScanLaunch): Promise<ScanLaunchResult> {
+  return request<ScanLaunchResult>(`/api/v1/projects/${projectId}/scans`, {
+    method: "POST",
+    body: { tool: "nmap", ...body },
+  });
+}
+
+export function listScans(
+  { projectId, limit = 50 }: { projectId?: number; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<Scan[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (projectId !== undefined) params.set("project_id", String(projectId));
+  return request<Scan[]>(`/api/v1/scans?${params.toString()}`, { signal });
+}
+
+export function getScanResults(scanId: number, signal?: AbortSignal): Promise<ScanResults> {
+  return request<ScanResults>(`/api/v1/scans/${scanId}/results`, { signal });
+}
+
+export function cancelScan(scanId: number): Promise<Scan> {
+  return request<Scan>(`/api/v1/scans/${scanId}/cancel`, { method: "POST" });
+}
+
+/** Split free-form target input (newlines, commas, spaces) into a list. */
+export function parseTargets(text: string): string[] {
+  return Array.from(new Set(text.split(/[\s,]+/).filter(Boolean)));
 }
 
 /**

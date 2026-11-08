@@ -11,8 +11,10 @@ from traceforge.db.repositories import ConflictError, NotFoundError
 from traceforge.execution.executor import (
     AuthorizationWindowError,
     Executor,
+    InvalidOptionsError,
     ToolUnavailableError,
 )
+from traceforge.execution.jobs import QueueFullError
 from traceforge.execution.scope import InvalidTargetError, ScopeViolationError, parse_scope_rule
 from traceforge.schemas import (
     Project,
@@ -20,7 +22,7 @@ from traceforge.schemas import (
     ScanLaunch,
     ScanLaunchResult,
     ScopeCheckResponse,
-    ScopeDecision,
+    ScopeDecisionDetail,
     ScopeRule,
     ScopeRuleCreate,
     TargetList,
@@ -133,16 +135,31 @@ async def check_scope(
         raise HTTPException(422, str(exc)) from exc
     return ScopeCheckResponse(
         allowed=all(d.allowed for d in decisions),
-        decisions=[ScopeDecision(**vars(d)) for d in decisions],
+        decisions=[ScopeDecisionDetail(**vars(d)) for d in decisions],
     )
+
+
+def _decision(d) -> dict:
+    return {**vars(d), "addresses": list(d.addresses)}
 
 
 @router.post("/{project_id}/scans", response_model=ScanLaunchResult, status_code=202)
 async def launch_scan(
     project_id: int, body: ScanLaunch, principal: AuthenticatedPrincipal, executor: ExecutorDep
 ) -> ScanLaunchResult:
+    """Authorize targets against the project's scope and queue a scan.
+
+    Returns ``202`` immediately; poll ``GET /api/v1/scans/{scan_id}`` for progress.
+    """
     try:
-        result = await executor.launch(project_id, body.tool, body.targets, actor=principal.actor)
+        result = await executor.launch(
+            project_id,
+            body.tool,
+            body.targets,
+            actor=principal.actor,
+            options=body.options,
+            timeout_seconds=body.timeout_seconds,
+        )
     except NotFoundError as exc:
         raise _not_found(exc) from exc
     except ScopeViolationError as exc:
@@ -150,13 +167,20 @@ async def launch_scan(
             status.HTTP_403_FORBIDDEN,
             {
                 "message": "Targets outside authorized scope; nothing was launched",
-                "decisions": [vars(d) for d in exc.decisions],
+                "decisions": [_decision(d) for d in exc.decisions],
             },
         ) from exc
     except AuthorizationWindowError as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
-    except InvalidTargetError as exc:
+    except (InvalidTargetError, InvalidOptionsError) as exc:
         raise HTTPException(422, str(exc)) from exc
     except ToolUnavailableError as exc:
         raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, str(exc)) from exc
-    return ScanLaunchResult(scan_id=result.scan_id, tool=result.tool, targets=result.targets)
+    except QueueFullError as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
+    return ScanLaunchResult(
+        scan_id=result.scan_id,
+        tool=result.tool,
+        targets=result.targets,
+        scan_addresses=result.scan_addresses,
+    )
