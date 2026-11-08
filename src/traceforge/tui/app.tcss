@@ -1,0 +1,27 @@
+Screen {
+    align: center middle;
+}
+
+#main {
+    width: 80;
+    height: auto;
+}
+
+#intro {
+    padding: 0 1 1 1;
+    color: $text-muted;
+}
+
+.panel {
+    border: round $primary;
+    padding: 1 2;
+    height: auto;
+}
+
+.panel.-ok {
+    border: round $success;
+}
+
+.panel.-error {
+    border: round $error;
+}
